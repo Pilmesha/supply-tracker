@@ -148,7 +148,14 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             }
             for item in line_items
         ])
-def create_table_if_not_exists(range_address, has_headers=True):
+def get_used_range(sheet_name="მიმდინარე "):
+    """Get the used range of a worksheet"""
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    resp = requests.get(url, headers=headers, params={"valuesOnly": "false"})
+    resp.raise_for_status()
+    return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
+def create_table_if_not_exists(range_address, has_headers=True, retries=3):
     """Create a new table if none exist yet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
@@ -160,20 +167,21 @@ def create_table_if_not_exists(range_address, has_headers=True):
     if existing_tables:
         return existing_tables[0]["name"]  # just reuse first table
 
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
-    payload = {
-        "address": range_address,
-        "hasHeaders": has_headers
-    }
-    resp = requests.post(url, headers=headers, json=payload)
+    url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
+    headers["Content-Type"] = "application/json"
+    payload = {"address": range_address, "hasHeaders": has_headers}
 
-    if resp.status_code in [200, 201]:
-        table = resp.json()
-        print(f"✅ Created table '{table['name']}' at range {range_address}")
-        return table["name"]
-    else:
-        raise Exception(f"❌ Failed to create table: {resp.status_code} {resp.text}")
+    for attempt in range(retries):
+        resp = requests.post(url_add, headers=headers, json=payload)
+        if resp.status_code in [200, 201]:
+            table = resp.json()
+            print(f"✅ Created table '{table['name']}' at range {range_address}")
+            return table["name"]
+        else:
+            print(f"⚠️ Table creation failed ({resp.status_code}), retrying...")
+            time.sleep(2)
+
+    raise Exception(f"❌ Failed to create table after {retries} retries: {resp.status_code} {resp.text}")
 
 def get_table_columns(table_name):
     """Fetch column names of an existing Excel table"""
@@ -184,11 +192,12 @@ def get_table_columns(table_name):
         return [col["name"] for col in resp.json().get("value", [])]
     else:
         raise Exception(f"❌ Failed to fetch columns: {resp.status_code} {resp.text}")
-def append_dataframe_to_table(df: pd.DataFrame, range_address="მიმდინარე !A1:Y1"):
+def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
     # Ensure table exists
+    range_address = get_used_range(sheet_name)
     table_name = create_table_if_not_exists(range_address)
 
     # Fetch table columns
