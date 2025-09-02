@@ -148,7 +148,65 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             }
             for item in line_items
         ])
+def ensure_table_exists(sheet_name: str = None) -> str:
+    base_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
+    # 1. Get existing tables
+    resp = requests.get(f"{base_url}/tables", headers=headers)
+    resp.raise_for_status()
+    tables = resp.json().get("value", [])
+
+    if tables:
+        return tables[0]["name"]  # use the first table
+
+    # 2. If no table exists, add one
+    if sheet_name:
+        body = {"address": f"მიმდინარე !A1:Y1", "hasHeaders": True}
+    else:
+        body = {"address": "A1:Y1", "hasHeaders": True}  # Excel will auto-expand
+
+    create_resp = requests.post(f"{base_url}/tables/add", headers=headers, json=body)
+    create_resp.raise_for_status()
+    return create_resp.json()["name"]
+
+def append_rows_to_table(df: pd.DataFrame):
+    if df.empty:
+        raise ValueError("❌ DataFrame is empty. Nothing to append.")
+
+    # --- Step 1: Ensure a table exists ---
+    table_name = ensure_table_exists("მიმდინარე ")
+
+    # --- Step 2: Get existing table columns ---
+    url_columns = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    resp = requests.get(url_columns, headers=headers)
+    resp.raise_for_status()
+    existing_columns = [col["name"] for col in resp.json().get("value", [])]
+
+    # --- Step 3: Normalize DataFrame ---
+    for col in existing_columns:
+        if col not in df.columns:
+            df[col] = ""
+
+    # Optional: if you have a 'Customer' column derived from 'Reference'
+    if "Reference" in df.columns and "Customer" in existing_columns:
+        df["Customer"] = df["Reference"]
+
+    df = df[existing_columns]
+
+    # Reset numbering (#) if that column exists
+    if "#" in existing_columns:
+        df["#"] = range(1, len(df) + 1)
+
+    # --- Step 4: Convert to list of lists and append ---
+    rows = df.astype(str).fillna("").values.tolist()
+    url_append = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
+    headers.update({"Content-Type": "application/json"})
+    resp = requests.post(url_append, headers=headers, json={"values": rows})
+
+    if resp.status_code not in [200, 201]:
+        raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text}")
 def update_excel(new_df: pd.DataFrame) -> None:
     """
     Update Excel file with new data. 
@@ -170,10 +228,8 @@ def update_excel(new_df: pd.DataFrame) -> None:
         existing_df = existing_df[1:]              # drop header row
     else:
         existing_df = pd.DataFrame()
-    is_purchase_order = 'PO' in new_df.columns
-    is_sales_order = 'SO' in new_df.columns and not is_purchase_order
     # ---Check if it's a purchase order (has Reference column) ---
-    if (is_purchase_order and not existing_df.empty and new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any()):
+    if new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any():
         if not existing_df.empty and 'SO' in existing_df.columns:
             # Create a mapping from Reference to rows in purchase data
             purch_ref_to_rows = {}
@@ -220,7 +276,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
                                         if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
                                             existing_df.at[sales_idx, col] = purch_value
                                             updated_count += 1
-    elif is_sales_order:
+    else:
         # Normalize new_df
         for col in existing_df.columns:
             if col not in new_df.columns:
@@ -276,7 +332,7 @@ def sales_webhook():
         return "Missing order ID", 400
 
     try:
-        update_excel(get_sales_order_df(order_id))
+        append_rows_to_table(get_sales_order_df(order_id))
         return "OK", 200
     except Exception as e:
         return f"Processing error: {e}", 500
