@@ -156,7 +156,6 @@ def update_excel(new_df: pd.DataFrame) -> None:
     If it's a purchase order (has Reference column), matches with existing sales orders.
     Numbering (#) restarts from 1 for every new batch of rows added.
     """
-    print("Got in the update_excel")
     # --- Step 1: Download current file from OneDrive ---
     url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
@@ -171,8 +170,10 @@ def update_excel(new_df: pd.DataFrame) -> None:
         existing_df = existing_df[1:]              # drop header row
     else:
         existing_df = pd.DataFrame()
+    is_purchase_order = 'PO' in new_df.columns
+    is_sales_order = 'SO' in new_df.columns and not is_purchase_order
     # ---Check if it's a purchase order (has Reference column) ---
-    if ('PO' in new_df.columns and new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any()):
+    if (is_purchase_order and not existing_df.empty and new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any()):
         if not existing_df.empty and 'SO' in existing_df.columns:
             # Create a mapping from Reference to rows in purchase data
             purch_ref_to_rows = {}
@@ -219,14 +220,13 @@ def update_excel(new_df: pd.DataFrame) -> None:
                                         if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
                                             existing_df.at[sales_idx, col] = purch_value
                                             updated_count += 1
-    else:
+    elif is_sales_order:
         # Normalize new_df
         for col in existing_df.columns:
             if col not in new_df.columns:
                 new_df[col] = ""
         new_df['Customer'] = new_df['Reference']
         new_df = new_df[existing_df.columns]
-        
 
         # ✅ Reset numbering from 1 for every new batch
         new_df['#'] = range(1, len(new_df) + 1)
@@ -270,7 +270,6 @@ def sales_webhook():
     # Check one - signaure
     if not verify_zoho_signature(request, "salesorders"):
         return "Invalid signature", 403
-    print('Signature verified')
     order_id = request.json.get("data", {}).get("salesorder_id")
     # Check two - order_id
     if not order_id:
@@ -288,7 +287,6 @@ def sales_webhook():
 def purchase_webhook():
     if not verify_zoho_signature(request, "purchaseorders"):
         return "Invalid signature", 403
-    print('Signature verified')
     order_id = request.json.get("data", {}).get("purchaseorders_id")
     if not order_id:
         return "Missing order ID", 400
