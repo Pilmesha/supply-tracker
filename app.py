@@ -230,63 +230,53 @@ def update_excel(new_df: pd.DataFrame) -> None:
         existing_df = pd.DataFrame()
     # ---Check if it's a purchase order (has Reference column) ---
     if new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any():
-        if not existing_df.empty and 'SO' in existing_df.columns:
-            # Create a mapping from Reference to rows in purchase data
-            purch_ref_to_rows = {}
-            for idx, row in new_df.iterrows():
-                ref = row['Reference']
-                if pd.notna(ref):
-                    refs = [r.strip() for r in str(ref).split(',') if r.strip()]
-                    for r in refs:
-                        if r not in purch_ref_to_rows:
-                            purch_ref_to_rows[r] = []
-                        purch_ref_to_rows[r].append(idx)
-            # Update existing sales orders with purchase data where references AND items match
-            updated_count = 0
-            for sales_idx, sales_row in existing_df.iterrows():
-                so_value = sales_row['SO']
-                sales_item = sales_row['Item']
-                
-                if pd.notna(so_value) and so_value in purch_ref_to_rows:
-                    # Find matching purchase order items for this SO
-                    for purch_idx in purch_ref_to_rows[so_value]:
-                        purch_item = new_df.at[purch_idx, 'Item']
-                        
-                        # Check if items match (or if either is empty/NaN)
-                        items_match = (
-                            (pd.isna(sales_item) and pd.notna(purch_item)) or
-                            (pd.isna(purch_item) and pd.notna(sales_item)) or
-                            (pd.notna(sales_item) and pd.notna(purch_item) and 
-                             str(sales_item).strip().lower() == str(purch_item).strip().lower())
-                        )
-                        
-                        if items_match:                          
-                            # Update all columns except SO and #
-                            for col in new_df.columns:
-                                if col in existing_df.columns and col not in ['SO', '#']:
-                                    sales_value = existing_df.at[sales_idx, col]
-                                    purch_value = new_df.at[purch_idx, col]
-                                    if col in ['შეკვეთის გაკეთების თარიღი', 'Customer', 'შეკვეთილი რაოდენობა']:
-                                        # Always use purchase value if it exists
-                                        if pd.notna(purch_value):
-                                            existing_df.at[sales_idx, col] = purch_value
-                                            updated_count += 1
-                                    else:
-                                        # For other columns, update only if sales value is empty and purchase value exists
-                                        if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
-                                            existing_df.at[sales_idx, col] = purch_value
-                                            updated_count += 1
+        # Create a mapping from Reference to rows in purchase data
+        purch_ref_to_rows = {}
+        for idx, row in new_df.iterrows():
+            ref = row['Reference']
+            if pd.notna(ref):
+                refs = [r.strip() for r in str(ref).split(',') if r.strip()]
+                for r in refs:
+                    if r not in purch_ref_to_rows:
+                        purch_ref_to_rows[r] = []
+                    purch_ref_to_rows[r].append(idx)
+        # Update existing sales orders with purchase data where references AND items match
+        updated_count = 0
+        for sales_idx, sales_row in existing_df.iterrows():
+            so_value = sales_row['SO']
+            sales_item = sales_row['Item']
+            
+            if pd.notna(so_value) and so_value in purch_ref_to_rows:
+                # Find matching purchase order items for this SO
+                for purch_idx in purch_ref_to_rows[so_value]:
+                    purch_item = new_df.at[purch_idx, 'Item']
+                    
+                    # Check if items match (or if either is empty/NaN)
+                    items_match = (
+                        (pd.isna(sales_item) and pd.notna(purch_item)) or
+                        (pd.isna(purch_item) and pd.notna(sales_item)) or
+                        (pd.notna(sales_item) and pd.notna(purch_item) and 
+                            str(sales_item).strip().lower() == str(purch_item).strip().lower())
+                    )
+                    
+                    if items_match:                          
+                        # Update all columns except SO and #
+                        for col in new_df.columns:
+                            if col in existing_df.columns and col not in ['SO', '#']:
+                                sales_value = existing_df.at[sales_idx, col]
+                                purch_value = new_df.at[purch_idx, col]
+                                if col in ['შეკვეთის გაკეთების თარიღი', 'Customer', 'შეკვეთილი რაოდენობა']:
+                                    # Always use purchase value if it exists
+                                    if pd.notna(purch_value):
+                                        existing_df.at[sales_idx, col] = purch_value
+                                        updated_count += 1
+                                else:
+                                    # For other columns, update only if sales value is empty and purchase value exists
+                                    if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
+                                        existing_df.at[sales_idx, col] = purch_value
+                                        updated_count += 1
     else:
-        # Normalize new_df
-        for col in existing_df.columns:
-            if col not in new_df.columns:
-                new_df[col] = ""
-        new_df['Customer'] = new_df['Reference']
-        new_df = new_df[existing_df.columns]
-
-        # ✅ Reset numbering from 1 for every new batch
-        new_df['#'] = range(1, len(new_df) + 1)
-        existing_df = pd.concat([existing_df, new_df], ignore_index=True)
+        append_rows_to_table(new_df)
     # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
     if "მიმდინარე " in wb.sheetnames:
         wb.remove(wb["მიმდინარე "])
