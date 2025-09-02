@@ -148,6 +148,10 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             }
             for item in line_items
         ])
+import time
+import requests
+import pandas as pd
+
 def get_used_range(sheet_name="მიმდინარე "):
     """Get the used range of a worksheet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
@@ -155,27 +159,40 @@ def get_used_range(sheet_name="მიმდინარე "):
     resp = requests.get(url, headers=headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
-def create_table_if_not_exists(range_address, has_headers=True, retries=3):
-    """Create a new table if none exist yet"""
+
+def drop_existing_tables():
+    """Delete all existing tables in workbook"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     resp = requests.get(url, headers=headers)
-    if resp.status_code == 200:
-        existing_tables = resp.json().get("value", [])
-    else:
-        raise Exception(f"❌ Failed to get table info: {resp.status_code} {resp.text}")
-    if existing_tables:
-        return existing_tables[0]["name"]  # just reuse first table
+    resp.raise_for_status()
+    tables = resp.json().get("value", [])
+
+    for t in tables:
+        tname = t["name"]
+        del_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{tname}"
+        resp = requests.delete(del_url, headers=headers)
+        if resp.status_code in [200, 204]:
+            print(f"🗑️ Deleted existing table '{tname}'")
+        else:
+            print(f"⚠️ Failed to delete table '{tname}': {resp.status_code} {resp.text}")
+
+def create_new_table(range_address, has_headers=True, retries=3):
+    """Always create a new table on given range (after dropping old ones)"""
+    drop_existing_tables()
 
     url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
-    headers["Content-Type"] = "application/json"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+        "Content-Type": "application/json"
+    }
     payload = {"address": range_address, "hasHeaders": has_headers}
 
     for attempt in range(retries):
         resp = requests.post(url_add, headers=headers, json=payload)
         if resp.status_code in [200, 201]:
             table = resp.json()
-            print(f"✅ Created table '{table['name']}' at range {range_address}")
+            print(f"✅ Created fresh table '{table['name']}' at {range_address}")
             return table["name"]
         else:
             print(f"⚠️ Table creation failed ({resp.status_code}), retrying...")
@@ -188,26 +205,27 @@ def get_table_columns(table_name):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     resp = requests.get(url, headers=headers)
-    if resp.status_code == 200:
-        return [col["name"] for col in resp.json().get("value", [])]
-    else:
-        raise Exception(f"❌ Failed to fetch columns: {resp.status_code} {resp.text}")
+    resp.raise_for_status()
+    return [col["name"] for col in resp.json().get("value", [])]
+
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
-    """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
+    """Normalize and append a Pandas DataFrame to a fresh Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
-    # Ensure table exists
-    range_address = get_used_range(sheet_name)
-    table_name = create_table_if_not_exists(range_address)
 
-    # Fetch table columns
+    # Always recreate table from used range
+    range_address = get_used_range(sheet_name)
+    table_name = create_new_table(range_address)
+
+    # Fetch new table columns
     table_columns = get_table_columns(table_name)
+
+    # Normalize DataFrame
     new_df = df.copy()
     for col in table_columns:
         if col not in new_df.columns:
             new_df[col] = ""
     new_df['#'] = range(1, len(new_df) + 1)
-    # Normalize
     df = new_df[table_columns]
 
     # Convert DataFrame → list of lists
@@ -216,13 +234,14 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
     payload = {"values": rows}
-    resp = requests.post(url, headers=headers, json=payload)
 
+    resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code in [200, 201]:
-        print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
+        print(f"✅ Successfully appended {len(rows)} rows to fresh table '{table_name}'")
         return resp.json()
     else:
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text}")
+
 
 def update_excel(new_df: pd.DataFrame) -> None:
     """
