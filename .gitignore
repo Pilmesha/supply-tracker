@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# Virtual environments
+venv/
+env/
+.env
+
+# Logs
+*.log
+
+# IDE / Editor
+.vscode/
+
+# Docker / build artifacts
+*.dockerfile
+*.tar
+*.img
+
+# OS files
+.DS_Store
+Thumbs.db
