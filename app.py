@@ -283,39 +283,39 @@ def update_excel(new_df: pd.DataFrame) -> None:
                                     if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
                                         existing_df.at[sales_idx, col] = purch_value
                                         updated_count += 1
+        # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
+        if "მიმდინარე " in wb.sheetnames:
+            wb.remove(wb["მიმდინარე "])
+        ws_new = wb.create_sheet("მიმდინარე ")
+
+        for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
+            ws_new.append(list(r))
+
+        # --- Step 5: Save workbook to memory ---
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        # --- Step 6: Upload back with retry if locked ---
+        url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+
+        max_attempts = 10  # up to ~5 minutes wait
+        for attempt in range(max_attempts):
+            resp = requests.put(url_upload, headers=headers, data=output.getvalue())
+
+            if resp.status_code in (423, 409):  # Locked
+                wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
+                print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+
+            resp.raise_for_status()
+            print("✅ Upload successful.")
+            break
+        else:
+            raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
     else:
         append_dataframe_to_table(new_df)
-    # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
-    if "მიმდინარე " in wb.sheetnames:
-        wb.remove(wb["მიმდინარე "])
-    ws_new = wb.create_sheet("მიმდინარე ")
-
-    for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
-        ws_new.append(list(r))
-
-    # --- Step 5: Save workbook to memory ---
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-
-    # --- Step 6: Upload back with retry if locked ---
-    url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-
-    max_attempts = 10  # up to ~5 minutes wait
-    for attempt in range(max_attempts):
-        resp = requests.put(url_upload, headers=headers, data=output.getvalue())
-
-        if resp.status_code in (423, 409):  # Locked
-            wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
-            print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-            time.sleep(wait_time)
-            continue
-
-        resp.raise_for_status()
-        print("✅ Upload successful.")
-        break
-    else:
-        raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
 
 
 
