@@ -77,7 +77,6 @@ def One_Drive_Auth():
 
 
 def get_sales_order_df(order_id: str) -> pd.DataFrame:
-    print("Got in the sales order df")
     url = f"https://www.zohoapis.com/inventory/v1/salesorders/{order_id}"
     headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
@@ -118,7 +117,6 @@ def get_sales_order_df(order_id: str) -> pd.DataFrame:
             "შეკვეთილი რაოდენობა": item.get("quantity"),
             "შეკვეთის გაკეთების თარიღი": date
         })
-    print("Done the sales order df")
     return pd.DataFrame(enriched_items)
 
 
@@ -151,7 +149,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             for item in line_items
         ])
 
-def update_excel(new_df: pd.DataFrame, path: str = "orders.xlsx") -> pd.DataFrame:
+def update_excel(new_df: pd.DataFrame) -> None:
     """
     Update Excel file with new data. 
     Automatically detects if it's a sales order or purchase order based on columns.
@@ -174,13 +172,7 @@ def update_excel(new_df: pd.DataFrame, path: str = "orders.xlsx") -> pd.DataFram
     else:
         existing_df = pd.DataFrame()
     # ---Check if it's a purchase order (has Reference column) ---
-    if (
-    "Reference" in new_df.columns 
-    and new_df["Reference"].notna().any() 
-    and not existing_df.empty 
-    and 'SO' in existing_df.columns
-    and new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any()
-    ):
+    if ('PO' in new_df.columns and new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any()):
         if not existing_df.empty and 'SO' in existing_df.columns:
             # Create a mapping from Reference to rows in purchase data
             purch_ref_to_rows = {}
@@ -275,7 +267,6 @@ def update_excel(new_df: pd.DataFrame, path: str = "orders.xlsx") -> pd.DataFram
 
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
-    print("Got salesorder")
     # Check one - signaure
     if not verify_zoho_signature(request, "salesorders"):
         return "Invalid signature", 403
@@ -295,7 +286,6 @@ def sales_webhook():
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
-    print("Got purchaseorder")
     if not verify_zoho_signature(request, "purchaseorders"):
         return "Invalid signature", 403
     print('Signature verified')
