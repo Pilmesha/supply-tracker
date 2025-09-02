@@ -16,5 +16,5 @@ USER appuser
 ENV PYTHONUNBUFFERED=1
 
 # Run with Gunicorn (secure Flask server)
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "main:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
 
