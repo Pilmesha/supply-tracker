@@ -77,6 +77,7 @@ def One_Drive_Auth():
 
 
 def get_sales_order_df(order_id: str) -> pd.DataFrame:
+    print("Got in the sales order df")
     url = f"https://www.zohoapis.com/inventory/v1/salesorders/{order_id}"
     headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
@@ -117,6 +118,7 @@ def get_sales_order_df(order_id: str) -> pd.DataFrame:
             "შეკვეთილი რაოდენობა": item.get("quantity"),
             "შეკვეთის გაკეთების თარიღი": date
         })
+    print("Done the sales order df")
     return pd.DataFrame(enriched_items)
 
 
@@ -156,6 +158,7 @@ def update_excel(new_df: pd.DataFrame, path: str = "orders.xlsx") -> pd.DataFram
     If it's a purchase order (has Reference column), matches with existing sales orders.
     Numbering (#) restarts from 1 for every new batch of rows added.
     """
+    print("Got in the update_excel")
     # --- Step 1: Download current file from OneDrive ---
     url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
@@ -272,10 +275,11 @@ def update_excel(new_df: pd.DataFrame, path: str = "orders.xlsx") -> pd.DataFram
 
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
+    print("Got salesorder")
     # Check one - signaure
     if not verify_zoho_signature(request, "salesorders"):
         return "Invalid signature", 403
-
+    print('Signature verified')
     order_id = request.json.get("data", {}).get("salesorder_id")
     # Check two - order_id
     if not order_id:
@@ -291,9 +295,10 @@ def sales_webhook():
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
+    print("Got purchaseorder")
     if not verify_zoho_signature(request, "purchaseorders"):
         return "Invalid signature", 403
-
+    print('Signature verified')
     order_id = request.json.get("data", {}).get("purchaseorders_id")
     if not order_id:
         return "Missing order ID", 400
