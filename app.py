@@ -148,65 +148,73 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             }
             for item in line_items
         ])
-def ensure_table_exists(sheet_name: str = None) -> str:
-    base_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook"
+def create_table_if_not_exists(range_address, has_headers=True):
+    """Create a new table if none exist yet"""
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-
-    # 1. Get existing tables
-    resp = requests.get(f"{base_url}/tables", headers=headers)
-    resp.raise_for_status()
-    tables = resp.json().get("value", [])
-
-    if tables:
-        return tables[0]["name"]  # use the first table
-
-    # 2. If no table exists, add one
-    if sheet_name:
-        body = {"address": f"მიმდინარე !A1:Y1", "hasHeaders": True}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        existing_tables = resp.json().get("value", [])
     else:
-        body = {"address": "A1:Y1", "hasHeaders": True}  # Excel will auto-expand
+        raise Exception(f"❌ Failed to get table info: {resp.status_code} {resp.text}")
+    if existing_tables:
+        return existing_tables[0]["name"]  # just reuse first table
 
-    create_resp = requests.post(f"{base_url}/tables/add", headers=headers, json=body)
-    create_resp.raise_for_status()
-    return create_resp.json()["name"]
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
+    payload = {
+        "address": range_address,
+        "hasHeaders": has_headers
+    }
+    resp = requests.post(url, headers=headers, json=payload)
 
-def append_rows_to_table(df: pd.DataFrame):
+    if resp.status_code in [200, 201]:
+        table = resp.json()
+        print(f"✅ Created table '{table['name']}' at range {range_address}")
+        return table["name"]
+    else:
+        raise Exception(f"❌ Failed to create table: {resp.status_code} {resp.text}")
+
+def get_table_columns(table_name):
+    """Fetch column names of an existing Excel table"""
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        return [col["name"] for col in resp.json().get("value", [])]
+    else:
+        raise Exception(f"❌ Failed to fetch columns: {resp.status_code} {resp.text}")
+def append_dataframe_to_table(df: pd.DataFrame, range_address="მიმდინარე !A1:Y1"):
+    """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
+    # Ensure table exists
+    table_name = create_table_if_not_exists(range_address)
 
-    # --- Step 1: Ensure a table exists ---
-    table_name = ensure_table_exists("მიმდინარე ")
+    # Fetch table columns
+    table_columns = get_table_columns(table_name)
+    new_df = df.copy()
+    for col in table_columns:
+        if col not in new_df.columns:
+            new_df[col] = ""
+    new_df['#'] = range(1, len(new_df) + 1)
+    # Normalize
+    df = new_df[table_columns]
 
-    # --- Step 2: Get existing table columns ---
-    url_columns = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    resp = requests.get(url_columns, headers=headers)
-    resp.raise_for_status()
-    existing_columns = [col["name"] for col in resp.json().get("value", [])]
-
-    # --- Step 3: Normalize DataFrame ---
-    for col in existing_columns:
-        if col not in df.columns:
-            df[col] = ""
-
-    # Optional: if you have a 'Customer' column derived from 'Reference'
-    if "Reference" in df.columns and "Customer" in existing_columns:
-        df["Customer"] = df["Reference"]
-
-    df = df[existing_columns]
-
-    # Reset numbering (#) if that column exists
-    if "#" in existing_columns:
-        df["#"] = range(1, len(df) + 1)
-
-    # --- Step 4: Convert to list of lists and append ---
+    # Convert DataFrame → list of lists
     rows = df.astype(str).fillna("").values.tolist()
-    url_append = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
-    headers.update({"Content-Type": "application/json"})
-    resp = requests.post(url_append, headers=headers, json={"values": rows})
 
-    if resp.status_code not in [200, 201]:
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
+    payload = {"values": rows}
+    resp = requests.post(url, headers=headers, json=payload)
+
+    if resp.status_code in [200, 201]:
+        print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
+        return resp.json()
+    else:
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text}")
+
 def update_excel(new_df: pd.DataFrame) -> None:
     """
     Update Excel file with new data. 
@@ -276,7 +284,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
                                         existing_df.at[sales_idx, col] = purch_value
                                         updated_count += 1
     else:
-        append_rows_to_table(new_df)
+        append_dataframe_to_table(new_df)
     # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
     if "მიმდინარე " in wb.sheetnames:
         wb.remove(wb["მიმდინარე "])
@@ -322,7 +330,7 @@ def sales_webhook():
         return "Missing order ID", 400
 
     try:
-        append_rows_to_table(get_sales_order_df(order_id))
+        append_dataframe_to_table(get_sales_order_df(order_id))
         return "OK", 200
     except Exception as e:
         return f"Processing error: {e}", 500
