@@ -177,6 +177,13 @@ def create_table_if_not_exists(sheet_name="მიმდინარე ", header
     table = resp.json()
     print(f"✅ Created table '{table['name']}' at range {range_address}")
     return table["name"]
+def get_table_columns(table_name):    
+    """Fetch column names of an existing Excel table"""
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return [col["name"] for col in resp.json().get("value", [])]
 
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე ", header_range="A1:Y1"):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
