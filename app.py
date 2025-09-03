@@ -158,14 +158,13 @@ def get_existing_tables():
     resp.raise_for_status()
     return resp.json().get("value", [])
 
-def create_table_if_not_exists(sheet_name="მიმდინარე ", header_range="A1:Y1", has_headers=True):
-    """Ensure a table exists on the given sheet. Reuse if exists, else create on fixed header row."""
+def create_table_if_not_exists(sheet_name="მიმდინარე ", header_range="B1:Y1", has_headers=True):
     tables = get_existing_tables()
     if tables:
-        return tables[0]["name"]  # just reuse the first table
+        return tables[0]["name"]
 
-    # Build explicit address (not using usedRange)
-    range_address = f"{sheet_name}!{header_range}"
+    # Wrap sheet name in quotes to handle spaces/unicode
+    range_address = f"'{sheet_name.strip()}'!{header_range}"
 
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
     headers = {
@@ -173,11 +172,14 @@ def create_table_if_not_exists(sheet_name="მიმდინარე ", header
         "Content-Type": "application/json"
     }
     payload = {"address": range_address, "hasHeaders": has_headers}
+
     resp = requests.post(url, headers=headers, json=payload)
-    resp.raise_for_status()
-    table = resp.json()
-    print(f"✅ Created table '{table['name']}' at range {range_address}")
-    return table["name"]
+    if resp.status_code in [200, 201]:
+        table = resp.json()
+        print(f"✅ Created table '{table['name']}' at range {range_address}")
+        return table["name"]
+    else:
+        raise Exception(f"❌ Failed to create table: {resp.status_code} {resp.text}")
 def get_table_columns(table_name):    
     """Fetch column names of an existing Excel table"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
@@ -186,7 +188,7 @@ def get_table_columns(table_name):
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
 
-def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე ", header_range="A1:Y1"):
+def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე ", header_range="B1:Y1"):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
