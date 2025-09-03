@@ -505,6 +505,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
 
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
+    One_Drive_Auth()
     # Check one - signaure
     if not verify_zoho_signature(request, "salesorders"):
         return "Invalid signature", 403
@@ -523,6 +524,7 @@ def sales_webhook():
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
+    One_Drive_Auth()
     if not verify_zoho_signature(request, "purchaseorders"):
         return "Invalid signature", 403
     order_id = request.json.get("data", {}).get("purchaseorders_id")
