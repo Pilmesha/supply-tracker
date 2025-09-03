@@ -165,39 +165,56 @@ def _graph_headers(session_id: Optional[str] = None, extra: Optional[dict] = Non
     return h
 
 def _req(method: str, url: str, headers: dict, **kwargs) -> requests.Response:
-    """
-    Robust request with retries/backoff for transient Graph/Excel issues.
-    Honors Retry-After when present.
-    """
     timeout = kwargs.pop("timeout", DEFAULT_TIMEOUT)
     backoff = 1.0
-    for attempt in range(6):
-        resp = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
-        if resp.status_code not in RETRY_STATUS:
-            return resp
-        # Retry with server hint if any
-        ra = resp.headers.get("Retry-After")
-        if ra:
-            try:
-                sleep_s = float(ra)
-            except ValueError:
+    max_attempts = 10  # Increased from 6
+    last_exception = None
+    
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
+            
+            # Success case
+            if resp.status_code not in RETRY_STATUS:
+                return resp
+                
+            # Handle rate limiting
+            ra = resp.headers.get("Retry-After")
+            if ra:
+                try:
+                    sleep_s = float(ra)
+                except ValueError:
+                    sleep_s = backoff
+            else:
                 sleep_s = backoff
-        else:
-            sleep_s = backoff
-        time.sleep(min(sleep_s, 10))
-        backoff = min(backoff * 2, 10)
-    return resp  # final response (likely still an error)
+                
+            # Log the retry (add logging)
+            print(f"Attempt {attempt+1} failed with status {resp.status_code}. Retrying in {sleep_s}s")
+            time.sleep(min(sleep_s, 30))  # Increased max sleep
+            backoff = min(backoff * 2, 30)  # Increased max backoff
+            
+        except (requests.exceptions.ConnectionError, 
+                requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError) as e:
+            last_exception = e
+            time.sleep(min(backoff, 30))
+            backoff = min(backoff * 2, 30)
+            
+    # If all retries failed, raise the last exception or return last response
+    if last_exception:
+        raise last_exception
+    return resp
 
 def start_workbook_session(persist: bool = True) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/createSession"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, extra={"Content-Type": "application/json"})
+    headers = _graph_headers(extra={"Content-Type": "application/json"})  # Remove session_id here
     resp = _req("POST", url, headers, json={"persistChanges": persist})
     resp.raise_for_status()
     return resp.json()["id"]
 
 def close_workbook_session(session_id: str) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/closeSession"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id, {"Content-Type": "application/json"})
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     # best-effort close; ignore errors
     try:
         _req("POST", url, headers).raise_for_status()
@@ -206,7 +223,7 @@ def close_workbook_session(session_id: str) -> None:
 
 def get_worksheet_id_by_name(session_id: str, sheet_name: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id)
+    headers = _graph_headers(session_id)
     resp = _req("GET", url, headers)
     resp.raise_for_status()
     for ws in resp.json().get("value", []):
@@ -216,7 +233,7 @@ def get_worksheet_id_by_name(session_id: str, sheet_name: str) -> str:
 
 def get_used_range_address(session_id: str, worksheet_id: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{worksheet_id}/usedRange"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id)
+    headers = _graph_headers(session_id)
     # Sometimes workbook needs a moment after upload; retry is handled in _req
     resp = _req("GET", url, headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
@@ -224,14 +241,14 @@ def get_used_range_address(session_id: str, worksheet_id: str) -> str:
 
 def list_tables(session_id: str) -> List[dict]:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id)
+    headers = _graph_headers( session_id)
     resp = _req("GET", url, headers)
     resp.raise_for_status()
     return resp.json().get("value", [])
 
 def delete_table(session_id: str, table_name: str) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{quote(table_name)}"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id)
+    headers = _graph_headers(session_id)
     resp = _req("DELETE", url, headers)
     # 200/204 OK; if 404, ignore
     if resp.status_code not in (200, 204, 404):
@@ -239,14 +256,14 @@ def delete_table(session_id: str, table_name: str) -> None:
 
 def create_table(session_id: str, range_address: str, has_headers: bool = True) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id, {"Content-Type": "application/json"})
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     resp = _req("POST", url, headers, json={"address": range_address, "hasHeaders": has_headers})
     resp.raise_for_status()
     return resp.json()["name"]  # e.g., "Table1"
 
 def get_table_columns(session_id: str, table_name: str) -> List[str]:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{quote(table_name)}/columns"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id)
+    headers = _graph_headers(session_id)
     resp = _req("GET", url, headers)
     resp.raise_for_status()
     return [c["name"] for c in resp.json().get("value", [])]
@@ -267,7 +284,7 @@ def normalize_dataframe_to_columns(df: pd.DataFrame, table_columns: List[str]) -
 
 def append_rows_batch(session_id: str, table_name: str, rows: List[List[str]]) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{quote(table_name)}/rows/add"
-    headers = _graph_headers(ACCESS_TOKEN_DRIVE, session_id, {"Content-Type": "application/json"})
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     resp = _req("POST", url, headers, json={"values": rows})
     resp.raise_for_status()
 
@@ -278,52 +295,52 @@ def append_dataframe_to_table(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> str:
     """
-    Reliable end-to-end append:
-    - Opens a workbook session
-    - (Optionally) drops all tables and recreates one on the used range
-    - Normalizes df to table columns
-    - Appends in batches
-    Returns the table name used.
+    Reliable end-to-end append with corrected function calls
     """
     if df.empty:
         raise ValueError("DataFrame is empty. Nothing to append.")
 
-    session_id = start_workbook_session(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, persist=True)
+    session_id = start_workbook_session(persist=True)
     try:
-        ws_id = get_worksheet_id_by_name(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, sheet_name)
+        ws_id = get_worksheet_id_by_name(session_id, sheet_name)
 
         if drop_and_recreate_table:
             # Remove any stale tables
-            for t in list_tables(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id):
-                delete_table(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, t["name"])
-            # Let workbook settle a bit (post-upload scenarios)
-            time.sleep(1.5)
+            for t in list_tables(session_id):
+                delete_table(session_id, t["name"])
+            # Let workbook settle
+            time.sleep(2.0)  # Increased settle time
             # Create table over current used range
-            used_addr = get_used_range_address(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, ws_id)
-            table_name = create_table(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, used_addr, has_headers=True)
+            used_addr = get_used_range_address(session_id, ws_id)
+            table_name = create_table(session_id, used_addr, has_headers=True)
         else:
             # Reuse existing table or create one if none
-            tables = list_tables(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id)
+            tables = list_tables(session_id)
             if tables:
                 table_name = tables[0]["name"]
             else:
-                used_addr = get_used_range_address(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, ws_id)
-                table_name = create_table(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, used_addr, has_headers=True)
+                used_addr = get_used_range_address(session_id, ws_id)
+                table_name = create_table(session_id, used_addr, has_headers=True)
 
         # Normalize DF to the table's columns
-        table_columns = get_table_columns(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, table_name)
+        table_columns = get_table_columns(session_id, table_name)
         norm = normalize_dataframe_to_columns(df, table_columns)
         rows = norm.astype(str).fillna("").values.tolist()
 
-        # Append in batches
+        # Append in batches with small delays between batches
         for i in range(0, len(rows), batch_size):
-            append_rows_batch(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id, table_name, rows[i:i+batch_size])
+            append_rows_batch(session_id, table_name, rows[i:i+batch_size])
+            if i + batch_size < len(rows):  # Don't sleep after last batch
+                time.sleep(0.5)  # Small delay between batches
 
         return table_name
 
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Error in append_dataframe_to_table: {str(e)}")
+        raise
     finally:
-        # Close the session to persist and release locks
-        close_workbook_session(DRIVE_ID, FILE_ID, ACCESS_TOKEN_DRIVE, session_id)
+        close_workbook_session(session_id)
 
 
 def update_excel(new_df: pd.DataFrame) -> None:
