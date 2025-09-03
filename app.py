@@ -11,7 +11,8 @@ import time
 from openpyxl import load_workbook
 from typing import List, Optional
 from urllib.parse import quote
-
+import logging
+logging.basicConfig(level=logging.DEBUG)
 load_dotenv()
 
 CLIENT_ID = os.getenv('CLIENT_ID')
