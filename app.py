@@ -157,26 +157,54 @@ DEFAULT_TIMEOUT = 60  # seconds per request
 # --------------------------------
 
 def _graph_headers(session_id: Optional[str] = None, extra: Optional[dict] = None) -> dict:
-    h = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    # Remove ACCESS_TOKEN_DRIVE parameter, use global
+    h = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}  # ACCESS_TOKEN_DRIVE should be global
     if session_id:
         h["workbook-session-id"] = session_id
     if extra:
         h.update(extra)
     return h
 
+# Then call it correctly:
+
+
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
 def _req(method: str, url: str, headers: dict, **kwargs) -> requests.Response:
     timeout = kwargs.pop("timeout", DEFAULT_TIMEOUT)
     backoff = 1.0
-    max_attempts = 10  # Increased from 6
-    last_exception = None
     
-    for attempt in range(max_attempts):
+    logging.debug(f"Request: {method} {url}")
+    logging.debug(f"Headers: { {k: v for k, v in headers.items() if k != 'Authorization'} }")
+    
+    for attempt in range(6):
         try:
-            resp = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
+            resp = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)    
+            # Log detailed info for 500 errors
+            if resp.status_code >= 500:
+                print(f"=== 500 ERROR DETAILS ===")
+                print(f"URL: {url}")
+                print(f"Method: {method}")
+                print(f"Status: {resp.status_code}")
+                print(f"Response: {resp.text[:500]}...")  # First 500 chars
+                print("=========================")
             
-            # Success case
             if resp.status_code not in RETRY_STATUS:
                 return resp
+            
+            logging.debug(f"Attempt {attempt+1}: Status {resp.status_code}")
+            
+            if resp.status_code not in RETRY_STATUS:
+                return resp
+                
+            # Log response body for 500 errors
+            if resp.status_code >= 500:
+                try:
+                    error_body = resp.json()
+                    logging.error(f"Server error response: {error_body}")
+                except:
+                    logging.error(f"Server error, cannot parse JSON: {resp.text[:200]}")
                 
             # Handle rate limiting
             ra = resp.headers.get("Retry-After")
@@ -207,7 +235,7 @@ def _req(method: str, url: str, headers: dict, **kwargs) -> requests.Response:
 
 def start_workbook_session(persist: bool = True) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/createSession"
-    headers = _graph_headers(extra={"Content-Type": "application/json"})  # Remove session_id here
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     resp = _req("POST", url, headers, json={"persistChanges": persist})
     resp.raise_for_status()
     return resp.json()["id"]
@@ -223,7 +251,7 @@ def close_workbook_session(session_id: str) -> None:
 
 def get_worksheet_id_by_name(session_id: str, sheet_name: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets"
-    headers = _graph_headers(session_id)
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     resp = _req("GET", url, headers)
     resp.raise_for_status()
     for ws in resp.json().get("value", []):
@@ -234,36 +262,52 @@ def get_worksheet_id_by_name(session_id: str, sheet_name: str) -> str:
 def get_used_range_address(session_id: str, worksheet_id: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{worksheet_id}/usedRange"
     headers = _graph_headers(session_id)
-    # Sometimes workbook needs a moment after upload; retry is handled in _req
     resp = _req("GET", url, headers, params={"valuesOnly": "false"})
-    resp.raise_for_status()
-    return resp.json()["address"]  # e.g., "მიმდინარე !A1:Y120"
+    
+    if resp.status_code != 200:
+        logging.error(f"Used range failed: {resp.status_code} - {resp.text}")
+        resp.raise_for_status()
+    
+    address = resp.json()["address"]
+    logging.debug(f"Used range address: {address}")
+    return address
 
 def list_tables(session_id: str) -> List[dict]:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
-    headers = _graph_headers( session_id)
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     resp = _req("GET", url, headers)
     resp.raise_for_status()
     return resp.json().get("value", [])
 
 def delete_table(session_id: str, table_name: str) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{quote(table_name)}"
-    headers = _graph_headers(session_id)
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     resp = _req("DELETE", url, headers)
     # 200/204 OK; if 404, ignore
     if resp.status_code not in (200, 204, 404):
         resp.raise_for_status()
 
 def create_table(session_id: str, range_address: str, has_headers: bool = True) -> str:
+    # Validate the range address format
+    if not range_address or '!' not in range_address:
+        raise ValueError(f"Invalid range address: {range_address}")
+    
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
     headers = _graph_headers(session_id, {"Content-Type": "application/json"})
+    
+    logging.debug(f"Creating table with range: {range_address}")
+    
     resp = _req("POST", url, headers, json={"address": range_address, "hasHeaders": has_headers})
+    
+    if resp.status_code != 200:
+        logging.error(f"Table creation failed: {resp.status_code} - {resp.text}")
+    
     resp.raise_for_status()
-    return resp.json()["name"]  # e.g., "Table1"
+    return resp.json()["name"]
 
 def get_table_columns(session_id: str, table_name: str) -> List[str]:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{quote(table_name)}/columns"
-    headers = _graph_headers(session_id)
+    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
     resp = _req("GET", url, headers)
     resp.raise_for_status()
     return [c["name"] for c in resp.json().get("value", [])]
@@ -297,13 +341,16 @@ def append_dataframe_to_table(
     """
     Reliable end-to-end append with corrected function calls
     """
+    print("Starting debug process...")
     if df.empty:
         raise ValueError("DataFrame is empty. Nothing to append.")
-
+    print("1. Creating session...")
     session_id = start_workbook_session(persist=True)
+    print(f"   Session ID: {session_id}")
     try:
+        print("2. Getting worksheet...")
         ws_id = get_worksheet_id_by_name(session_id, sheet_name)
-
+        print(f"   Worksheet ID: {ws_id}")
         if drop_and_recreate_table:
             # Remove any stale tables
             for t in list_tables(session_id):
