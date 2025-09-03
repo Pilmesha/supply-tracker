@@ -9,8 +9,6 @@ import io
 import random
 import time
 from openpyxl import load_workbook
-from typing import List, Optional
-from urllib.parse import quote
 
 load_dotenv()
 
@@ -29,7 +27,7 @@ ACCESS_TOKEN = None
 app = Flask(__name__)
 
 
-def refresh_access_token():
+def refresh_access_token()-> str:
     global ACCESS_TOKEN
     url = "https://accounts.zoho.com/oauth/v2/token"
     params = {
@@ -61,7 +59,7 @@ def verify_zoho_signature(request, expected_module):
     ).hexdigest()
     
     return hmac.compare_digest(received_sign, expected_sign)
-def One_Drive_Auth():
+def One_Drive_Auth() -> str:
     global ACCESS_TOKEN_DRIVE
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
@@ -198,11 +196,22 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
-
     # Ensure table exists
     range_address = get_used_range(sheet_name)
     table_name = create_table_if_not_exists(range_address)
 
+    # Handle Customer/Reference substitution
+    if "Customer" in df.columns and "Reference" in df.columns:
+        df = df.copy()
+        for index, row in df.iterrows():
+            customer_val = row['Customer']
+            if (customer_val is None or 
+                (isinstance(customer_val, str) and customer_val.strip() == "") or 
+                (pd.isna(customer_val))):
+                df.at[index, 'Customer'] = row['Reference']
+
+        # ✅ Drop Reference column after substitution
+        df = df.drop(columns=["Reference"])
     # Fetch table columns
     table_columns = get_table_columns(table_name)
 
@@ -212,21 +221,24 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
         if col not in new_df.columns:
             new_df[col] = ""
     new_df['#'] = range(1, len(new_df) + 1)
-    df = new_df[table_columns]
+
+    # ✅ Restrict to table columns only
+    out_df = new_df[table_columns]
 
     # Convert DataFrame → list of lists
-    rows = df.astype(str).fillna("").values.tolist()
+    rows = out_df.fillna("").astype(str).values.tolist()
 
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
     payload = {"values": rows}
-
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code in [200, 201]:
         print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
         return resp.json()
     else:
-        raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text}")
+        print("❌ Error response content (truncated):", resp.text[:500])
+        raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
+
 
 def update_excel(new_df: pd.DataFrame) -> None:
     """
@@ -323,7 +335,9 @@ def update_excel(new_df: pd.DataFrame) -> None:
                 continue
 
             resp.raise_for_status()
-            print("✅ Upload successful.")
+            range_address = get_used_range("მიმდინარე ")
+            table_name = create_table_if_not_exists(range_address)
+            print(f"✅ Upload successful. Created table named {table_name}")
             break
         else:
             raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
