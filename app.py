@@ -235,8 +235,16 @@ def _req(method: str, url: str, headers: dict, **kwargs) -> requests.Response:
 
 def start_workbook_session(persist: bool = True) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/createSession"
-    headers = _graph_headers(session_id, {"Content-Type": "application/json"})
+    headers = _graph_headers(extra={"Content-Type": "application/json"})  # REMOVE ACCESS_TOKEN_DRIVE
     resp = _req("POST", url, headers, json={"persistChanges": persist})
+    
+    # Add detailed error logging
+    if resp.status_code != 200:
+        print(f"Session creation failed: {resp.status_code}")
+        print(f"Response: {resp.text}")
+        print(f"Request URL: {url}")
+        print(f"Headers: { {k: v for k, v in headers.items() if k != 'Authorization'} }")
+    
     resp.raise_for_status()
     return resp.json()["id"]
 
@@ -351,6 +359,7 @@ def append_dataframe_to_table(
         print("2. Getting worksheet...")
         ws_id = get_worksheet_id_by_name(session_id, sheet_name)
         print(f"   Worksheet ID: {ws_id}")
+        
         if drop_and_recreate_table:
             # Remove any stale tables
             for t in list_tables(session_id):
