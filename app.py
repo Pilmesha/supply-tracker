@@ -130,11 +130,10 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     response = requests.get(url, headers=headers)
     response.raise_for_status()
     purchaseorder = response.json().get("purchaseorder", {})
-
     po_number = purchaseorder.get("purchaseorder_number")
     date = purchaseorder.get("date")
     reference = purchaseorder.get("reference_number"),
-    supplier_company = purchaseorder.get("supplier_company")
+    supplier_company = purchaseorder.get("vendor_name")
     line_items = purchaseorder.get("line_items", [])
     return pd.DataFrame([
             {
@@ -199,7 +198,6 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
-    print(df)
     # Ensure table exists
     range_address = get_used_range(sheet_name)
     table_name = create_table_if_not_exists(range_address)
