@@ -132,17 +132,11 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     purchaseorder = response.json().get("purchaseorder", {})
     po_number = purchaseorder.get("purchaseorder_number")
     date = purchaseorder.get("date")
-    reference = purchaseorder.get("reference_number"),
+    reference = purchaseorder.get("reference_number")
+    if reference:
+        reference = reference.strip("()").strip().rstrip(",")
     supplier_company = purchaseorder.get("vendor_name")
     line_items = purchaseorder.get("line_items", [])
-    print(pd.DataFrame([
-            {
-                "Supplier Company": supplier_company,
-                "PO": po_number,
-                "Reference": reference
-            }
-            for item in line_items
-        ]))
     return pd.DataFrame([
             {
                 "Supplier Company": supplier_company,
