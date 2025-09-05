@@ -23,58 +23,11 @@ CLIENT_ID_DRIVE = os.getenv('CLIENT_ID_DRIVE')
 CLIENT_SECRET_DRIVE = os.getenv('CLIENT_SECRET_DRIVE')
 DRIVE_ID = os.getenv('DRIVE_ID')
 FILE_ID = os.getenv('FILE_ID')
-
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN = None
 DOC_TYPES = ["purchaseorders", "salesorders"]
 app = Flask(__name__)
-
-def fetch_recent_orders() -> list[dict]:
-    base_url = "https://www.zohoapis.com/inventory/v1"
-    result = []
-    for doc_type in DOC_TYPES:
-        url = f"{base_url}/{doc_type}"
-
-        headers = {
-            "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
-            "X-com-zoho-inventory-organizationid": ORG_ID
-        }
-        today = datetime.utcnow().date()
-        from_date = (today - timedelta(days=2)).isoformat()  # 3 days ago
-        to_date = today.isoformat()
-        params = {
-        "date_start": from_date,
-        "date_end": to_date
-        }
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        orders = response.json().get(doc_type, [])
-        for order in orders:
-            order_id = order.get("purchaseorder_id") if doc_type == "purchaseorders" else order.get("salesorder_id")
-            result.append({
-                "order_id": order_id,
-                "type": "purchaseorder" if doc_type == "purchaseorders" else "salesorder"
-            })
-    return result
-@app.before_first_request
-def monday_saturday_check() -> None:
-    """
-    Run once when Flask starts: 
-    If today is Monday, fetch & process Saturday orders.
-    """
-    now = datetime.now()
-    if now.weekday() == 0:
-        print("🔄 Checking for Saturday-created orders...")
-        orders = fetch_recent_orders()
-        for order in orders:
-            if order['type'] == "salesorder":
-                One_Drive_Auth()
-                append_dataframe_to_table(get_sales_order_df(order['order_id']))
-            else:
-                One_Drive_Auth()
-                threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
-
-
+# ----------- AUTH -----------
 def refresh_access_token()-> str:
     global ACCESS_TOKEN
     url = "https://accounts.zoho.com/oauth/v2/token"
@@ -87,7 +40,6 @@ def refresh_access_token()-> str:
     resp = requests.post(url, params=params).json()
     ACCESS_TOKEN = resp["access_token"]
     return ACCESS_TOKEN
-
 def verify_zoho_signature(request, expected_module):
     # Select secret based on webhook type
     secret_key = (
@@ -121,8 +73,7 @@ def One_Drive_Auth() -> str:
     resp = requests.post(url, data=data)
     ACCESS_TOKEN_DRIVE = resp.json().get("access_token")
     return ACCESS_TOKEN_DRIVE
-
-
+# ----------- GET DF -----------
 def get_sales_order_df(order_id: str) -> pd.DataFrame:
     url = f"https://www.zohoapis.com/inventory/v1/salesorders/{order_id}"
     headers = {
@@ -165,8 +116,6 @@ def get_sales_order_df(order_id: str) -> pd.DataFrame:
             "შეკვეთის გაკეთების თარიღი": date
         })
     return pd.DataFrame(enriched_items)
-
-
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     url = f"https://www.zohoapis.com/inventory/v1/purchaseorders/{order_id}"
     headers = {
@@ -198,7 +147,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             }
             for item in line_items
         ])
-
+# ----------- HELPER FUNCS FOR EXCEL -----------
 def get_used_range(sheet_name="მიმდინარე "):
     """Get the used range of a worksheet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
@@ -206,7 +155,6 @@ def get_used_range(sheet_name="მიმდინარე "):
     resp = requests.get(url, headers=headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
-
 def create_table_if_not_exists(range_address, has_headers=True, retries=3):
     """Create a new table if none exist yet, retry if workbook is busy"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
@@ -234,7 +182,6 @@ def create_table_if_not_exists(range_address, has_headers=True, retries=3):
             time.sleep(2)
 
     raise Exception(f"❌ Failed to create table after {retries} retries: {resp.status_code} {resp.text}")
-
 def get_table_columns(table_name):
     """Fetch column names of an existing Excel table"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
@@ -242,7 +189,7 @@ def get_table_columns(table_name):
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
-
+# ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
@@ -288,8 +235,6 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
     else:
         print("❌ Error response content (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
-
-
 def update_excel(new_df: pd.DataFrame) -> None:
     """
     Update Excel file with new data. 
@@ -406,7 +351,50 @@ def update_excel(new_df: pd.DataFrame) -> None:
             append_dataframe_to_table(new_df)
     except Exception as e:
         print(f"❌ Fatal error: {e}")
-
+# ----------- MONDAY CHECKING -----------
+def fetch_recent_orders() -> list[dict]:
+    base_url = "https://www.zohoapis.com/inventory/v1"
+    result = []
+    for doc_type in DOC_TYPES:
+        url = f"{base_url}/{doc_type}"
+        headers = {
+            "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
+            "X-com-zoho-inventory-organizationid": ORG_ID
+        }
+        today = datetime.D().date()
+        from_date = (today - timedelta(days=2)).isoformat()  # 3 days ago
+        to_date = today.isoformat()
+        params = {
+        "date_start": from_date,
+        "date_end": to_date
+        }
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        orders = response.json().get(doc_type, [])
+        for order in orders:
+            order_id = order.get("purchaseorder_id") if doc_type == "purchaseorders" else order.get("salesorder_id")
+            result.append({
+                "order_id": order_id,
+                "type": "purchaseorder" if doc_type == "purchaseorders" else "salesorder"
+            })
+    return result
+with app.app_context():
+    """
+    Run once when Flask starts: 
+    If today is Monday, fetch & process Saturday orders.
+    """
+    now = datetime.now()
+    if now.weekday() == 0:
+        print("🔄 Checking for Saturday-created orders...")
+        orders = fetch_recent_orders()
+        for order in orders:
+            if order['type'] == "salesorder":
+                One_Drive_Auth()
+                append_dataframe_to_table(get_sales_order_df(order['order_id']))
+            else:
+                One_Drive_Auth()
+                threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
+# ----------- SALES ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
     One_Drive_Auth()
@@ -423,8 +411,6 @@ def sales_webhook():
         return "OK", 200
     except Exception as e:
         return f"Processing error: {e}", 500
-
-
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
@@ -442,6 +428,7 @@ def purchase_webhook():
     except Exception as e:
         
         return f"Processing error: {e}", 500
+# ----------- HEALTH CHECK -----------
 @app.route("/health")
 def health():
     return {'health':'ok'}
