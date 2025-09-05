@@ -10,6 +10,7 @@ import random
 import time
 from openpyxl import load_workbook
 import threading
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -25,7 +26,53 @@ FILE_ID = os.getenv('FILE_ID')
 
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN = None
+DOC_TYPES = ["purchaseorders", "salesorders"]
 app = Flask(__name__)
+
+def fetch_recent_orders() -> list[dict]:
+    base_url = "https://www.zohoapis.com/inventory/v1"
+    result = []
+    for doc_type in DOC_TYPES:
+        url = f"{base_url}/{doc_type}"
+
+        headers = {
+            "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
+            "X-com-zoho-inventory-organizationid": ORG_ID
+        }
+        today = datetime.utcnow().date()
+        from_date = (today - timedelta(days=2)).isoformat()  # 3 days ago
+        to_date = today.isoformat()
+        params = {
+        "date_start": from_date,
+        "date_end": to_date
+        }
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        orders = response.json().get(doc_type, [])
+        for order in orders:
+            order_id = order.get("purchaseorder_id") if doc_type == "purchaseorders" else order.get("salesorder_id")
+            result.append({
+                "order_id": order_id,
+                "type": "purchaseorder" if doc_type == "purchaseorders" else "salesorder"
+            })
+    return result
+@app.before_first_request
+def monday_saturday_check() -> None:
+    """
+    Run once when Flask starts: 
+    If today is Monday, fetch & process Saturday orders.
+    """
+    now = datetime.now()
+    if now.weekday() == 0:
+        print("🔄 Checking for Saturday-created orders...")
+        orders = fetch_recent_orders()
+        for order in orders:
+            if order['type'] == "salesorder":
+                One_Drive_Auth()
+                append_dataframe_to_table(get_sales_order_df(order['order_id']))
+            else:
+                One_Drive_Auth()
+                threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
 
 
 def refresh_access_token()-> str:
@@ -359,8 +406,6 @@ def update_excel(new_df: pd.DataFrame) -> None:
             append_dataframe_to_table(new_df)
     except Exception as e:
         print(f"❌ Fatal error: {e}")
-
-
 
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
