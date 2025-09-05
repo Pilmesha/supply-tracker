@@ -273,6 +273,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
         else:
             print("❌ Gave up downloading file after 10 minutes")
             return
+        new_df = new_df.drop('Supplier Company', axis=1)
         # ---Check if it's a purchase order (has Reference column) ---
         if new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any():
             # Create a mapping from Reference to rows in purchase data
