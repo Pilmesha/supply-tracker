@@ -199,10 +199,10 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
+    print(df)
     # Ensure table exists
     range_address = get_used_range(sheet_name)
     table_name = create_table_if_not_exists(range_address)
-
     # Handle Customer/Reference substitution
     if "Customer" in df.columns and "Reference" in df.columns:
         df = df.copy()
