@@ -139,13 +139,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             {
                 "Supplier Company": supplier_company,
                 "PO": po_number,
-                "შეკვეთის გაკეთების თარიღი": date,
-                "Item": item.get("name"),
-                "Code": item.get("sku"),
-                "Reference": reference,
-                "შეკვეთილი რაოდენობა": item.get("quantity"),
-                "Customer": next((field.get("value_formatted") for field in item.get("item_custom_fields", []) 
-                                if field.get("label") == "Customer"), None)
+                "Reference": reference
             }
             for item in line_items
         ]))
