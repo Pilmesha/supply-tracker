@@ -389,64 +389,67 @@ with app.app_context():
     if now.weekday() == 0:
         print("🔄 Checking for Saturday-created orders...")
         orders = fetch_recent_orders()
-        # --- Step 1: Download current file from OneDrive ---
-        url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-        resp = requests.get(url_download, headers=headers)
-        resp.raise_for_status()
-        file_stream = io.BytesIO(resp.content)
-        wb = load_workbook(file_stream)
-        if "მიმდინარე " in wb.sheetnames:
-            ws = wb["მიმდინარე "]
-            existing_df = pd.DataFrame(ws.values)
-            existing_df.columns = existing_df.iloc[0]  # first row as header
-            existing_df = existing_df[1:]              # drop header row
-        else:
-            existing_df = pd.DataFrame()
-        for order in orders:
-            if order['type'] == "salesorder":
-                if "SO" in existing_df.columns:
-                    existing_df = existing_df[existing_df["SO"] != order["order_number"]]
-            else:  # purchase order
-                if "PO" in existing_df.columns:
-                    existing_df = existing_df[existing_df["PO"] != order["order_number"]]
-        # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
-        if "მიმდინარე " in wb.sheetnames:
-            wb.remove(wb["მიმდინარე "])
-        ws_new = wb.create_sheet("მიმდინარე ")
-
-        for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
-            ws_new.append(list(r))
-
-        # --- Step 5: Save workbook to memory ---
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-
-        # --- Step 6: Upload back with retry if locked ---
-        url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-
-        max_attempts = 10  # up to ~5 minutes wait
-        for attempt in range(max_attempts):
-            resp = requests.put(url_upload, headers=headers, data=output.getvalue())
-
-            if resp.status_code in (423, 409):  # Locked
-                wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
-                print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-                time.sleep(wait_time)
-                continue
-
+        if orders:
+            # --- Step 1: Download current file from OneDrive ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+            resp = requests.get(url_download, headers=headers)
             resp.raise_for_status()
-            range_address = get_used_range("მიმდინარე ")
-            table_name = create_table_if_not_exists(range_address)
-            print(f"✅ Cleaned table {table_name}")
-        for order in orders:
-            if order['type'] == "salesorder":
-                One_Drive_Auth()
-                append_dataframe_to_table(get_sales_order_df(order['order_id']))
+            file_stream = io.BytesIO(resp.content)
+            wb = load_workbook(file_stream)
+            if "მიმდინარე " in wb.sheetnames:
+                ws = wb["მიმდინარე "]
+                existing_df = pd.DataFrame(ws.values)
+                existing_df.columns = existing_df.iloc[0]  # first row as header
+                existing_df = existing_df[1:]              # drop header row
             else:
-                One_Drive_Auth()
-                threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
+                existing_df = pd.DataFrame()
+            for order in orders:
+                if order['type'] == "salesorder":
+                    if "SO" in existing_df.columns:
+                        existing_df = existing_df[existing_df["SO"] != order["order_number"]]
+                else:  # purchase order
+                    if "PO" in existing_df.columns:
+                        existing_df = existing_df[existing_df["PO"] != order["order_number"]]
+            # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
+            if "მიმდინარე " in wb.sheetnames:
+                wb.remove(wb["მიმდინარე "])
+            ws_new = wb.create_sheet("მიმდინარე ")
+
+            for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
+                ws_new.append(list(r))
+
+            # --- Step 5: Save workbook to memory ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            # --- Step 6: Upload back with retry if locked ---
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+
+            max_attempts = 10  # up to ~5 minutes wait
+            for attempt in range(max_attempts):
+                resp = requests.put(url_upload, headers=headers, data=output.getvalue())
+
+                if resp.status_code in (423, 409):  # Locked
+                    wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
+                    print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                resp.raise_for_status()
+                range_address = get_used_range("მიმდინარე ")
+                table_name = create_table_if_not_exists(range_address)
+                print(f"✅ Cleaned table {table_name}")
+            for order in orders:
+                if order['type'] == "salesorder":
+                    One_Drive_Auth()
+                    append_dataframe_to_table(get_sales_order_df(order['order_id']))
+                else:
+                    One_Drive_Auth()
+                    threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
+        else:
+            print("ℹ️ No new Saturday orders found, skipping cleanup.")
 # ----------- SALES ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
