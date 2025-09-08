@@ -25,7 +25,7 @@ DRIVE_ID = os.getenv('DRIVE_ID')
 FILE_ID = os.getenv('FILE_ID')
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN = None
-DOC_TYPES = ["purchaseorders", "salesorders"]
+DOC_TYPES = ["salesorders","purchaseorders"]
 app = Flask(__name__)
 # ----------- AUTH -----------
 def refresh_access_token()-> str:
