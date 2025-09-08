@@ -10,8 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 COPY . .
 
-# Switch to non-root
-USER appuser
+RUN mkdir -p /app/job_data && chmod -R 777 /app/job_data
 
 ENV PYTHONUNBUFFERED=1
 
