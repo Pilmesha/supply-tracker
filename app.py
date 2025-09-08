@@ -26,6 +26,9 @@ FILE_ID = os.getenv('FILE_ID')
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN = None
 DOC_TYPES = ["salesorders","purchaseorders"]
+
+MARKER_DIR = "/app/job_data"
+MARKER_FILE = os.path.join(MARKER_DIR, "last_run.txt")
 app = Flask(__name__)
 # ----------- AUTH -----------
 def refresh_access_token()-> str:
@@ -352,6 +355,24 @@ def update_excel(new_df: pd.DataFrame) -> None:
     except Exception as e:
         print(f"❌ Fatal error: {e}")
 # ----------- MONDAY CHECKING -----------
+def already_ran_today() -> bool:
+    """Check if the daily job already ran today."""
+    if not os.path.exists(MARKER_FILE):
+        return False
+    with open(MARKER_FILE, "r") as f:
+        last_run_str = f.read().strip()
+    try:
+        last_run = datetime.strptime(last_run_str, "%Y-%m-%d").date()
+        return last_run == datetime.utcnow().date()
+    except ValueError:
+        return False
+
+def update_marker():
+    """Update marker file to today’s date."""
+    os.makedirs(MARKER_DIR, exist_ok=True)
+    with open(MARKER_FILE, "w") as f:
+        f.write(datetime.utcnow().date().isoformat())
+
 def fetch_recent_orders() -> list[dict]:
     base_url = "https://www.zohoapis.com/inventory/v1"
     result = []
@@ -386,7 +407,7 @@ with app.app_context():
     If today is Monday, fetch & process Saturday orders.
     """
     now = datetime.now()
-    if now.weekday() == 0:
+    if now.weekday() == 0 and not already_ran_today():
         print("🔄 Checking for Saturday-created orders...")
         orders = fetch_recent_orders()
         if orders:
@@ -448,8 +469,10 @@ with app.app_context():
                 else:
                     One_Drive_Auth()
                     threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
+            update_marker()
         else:
             print("ℹ️ No new Saturday orders found, skipping cleanup.")
+            update_marker()
 # ----------- SALES ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
