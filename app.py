@@ -11,6 +11,7 @@ import time
 from openpyxl import load_workbook
 import threading
 from datetime import datetime, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 
 load_dotenv()
 
@@ -27,7 +28,7 @@ ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN = None
 DOC_TYPES = ["salesorders","purchaseorders"]
 
-MARKER_DIR = "/app/job_data"
+MARKER_DIR = "/var/lib/myapp"   # persistent location
 MARKER_FILE = os.path.join(MARKER_DIR, "last_run.txt")
 app = Flask(__name__)
 # ----------- AUTH -----------
@@ -401,13 +402,13 @@ def fetch_recent_orders() -> list[dict]:
                 "type": "purchaseorder" if doc_type == "purchaseorders" else "salesorder"
             })
     return result
-with app.app_context():
+def monday_job():
     """
-    Run once when Flask starts: 
+    Run with apscheduler: 
     If today is Monday, fetch & process Saturday orders.
     """
     now = datetime.now()
-    if now.weekday() == 0 and not already_ran_today():
+    if now.weekday() == 0 and not already_ran_today(): # Monday only
         print("🔄 Checking for Saturday-created orders...")
         orders = fetch_recent_orders()
         if orders:
@@ -469,10 +470,15 @@ with app.app_context():
                 else:
                     One_Drive_Auth()
                     threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
-            update_marker()
         else:
             print("ℹ️ No new Saturday orders found, skipping cleanup.")
-            update_marker()
+        update_marker()
+scheduler = BackgroundScheduler()
+scheduler.add_job(monday_job, "cron", day_of_week="mon", hour=6)  # Monday 08:00 UTC
+scheduler.start()
+@app.route("/")
+def index():
+    return "App is running. Scheduler is active."
 # ----------- SALES ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
