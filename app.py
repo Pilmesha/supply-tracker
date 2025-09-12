@@ -252,14 +252,18 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
 def update_excel(new_df: pd.DataFrame) -> None:
     """
-    Update Excel file with new data. 
+    Update Excel file with new data.
     Automatically detects if it's a sales order or purchase order based on columns.
     If it's a purchase order (has Reference column), matches with existing sales orders.
     Numbering (#) restarts from 1 for every new batch of rows added.
     """
     with EXCEL_LOCK:
+        file_stream = None
+        wb = None
+        existing_df = pd.DataFrame()
+
         try:
-                        # --- Step 1: Download current file from OneDrive ---
+            # --- Step 1: Download current file from OneDrive ---
             url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
             headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
@@ -269,24 +273,15 @@ def update_excel(new_df: pd.DataFrame) -> None:
                     resp = HTTP.get(url_download, headers=headers, timeout=60)
                     resp.raise_for_status()
                     file_stream = io.BytesIO(resp.content)
-                    try:
-                        wb = load_workbook(file_stream)
-                        if "მიმდინარე " in wb.sheetnames:
-                            ws = wb["მიმდინარე "]
-                            existing_df = pd.DataFrame(ws.values)
-                            existing_df.columns = existing_df.iloc[0]  # first row as header
-                            existing_df = existing_df[1:]              # drop header row
-                        else:
-                            existing_df = pd.DataFrame()
-                    finally:
-                        try:
-                            wb.close()
-                        except Exception:
-                            pass
-                        try:
-                            file_stream.close()
-                        except Exception:
-                            pass
+                    wb = load_workbook(file_stream)
+
+                    if "მიმდინარე " in wb.sheetnames:
+                        ws = wb["მიმდინარე "]
+                        existing_df = pd.DataFrame(ws.values)
+                        existing_df.columns = existing_df.iloc[0]  # first row as header
+                        existing_df = existing_df[1:]              # drop header row
+                    else:
+                        existing_df = pd.DataFrame()
                     break
                 except Exception as e:
                     wait = min(5 * (attempt + 1), 30)
@@ -295,54 +290,54 @@ def update_excel(new_df: pd.DataFrame) -> None:
             else:
                 print("❌ Gave up downloading file after attempts")
                 return
-            # ---Check if it's a purchase order (has Reference column) ---
-            if new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any():
-                # Create a mapping from Reference to rows in purchase data
+
+            # --- Step 2: Check if it's a purchase order ---
+            if new_df.get("Reference") is not None and new_df["Reference"].apply(
+                lambda x: any(r.strip() in set(existing_df.get("SO", [])) for r in str(x).split(",")) if pd.notna(x) else False
+            ).any():
+                # Purchase order logic...
                 purch_ref_to_rows = {}
                 for idx, row in new_df.iterrows():
-                    ref = row['Reference']
+                    ref = row.get("Reference")
                     if pd.notna(ref):
-                        refs = [r.strip() for r in str(ref).split(',') if r.strip()]
+                        refs = [r.strip() for r in str(ref).split(",") if r.strip()]
                         for r in refs:
-                            if r not in purch_ref_to_rows:
-                                purch_ref_to_rows[r] = []
-                            purch_ref_to_rows[r].append(idx)
-                # Update existing sales orders with purchase data where references AND items match
+                            purch_ref_to_rows.setdefault(r, []).append(idx)
+
                 updated_count = 0
                 for sales_idx, sales_row in existing_df.iterrows():
-                    so_value = sales_row['SO']
-                    sales_item = sales_row['Item']
-                    
+                    so_value = sales_row.get("SO")
+                    sales_item = sales_row.get("Item")
+
                     if pd.notna(so_value) and so_value in purch_ref_to_rows:
-                        # Find matching purchase order items for this SO
                         for purch_idx in purch_ref_to_rows[so_value]:
-                            purch_item = new_df.at[purch_idx, 'Item']
-                            
-                            # Check if items match (or if either is empty/NaN)
+                            purch_item = new_df.at[purch_idx, "Item"]
+
                             items_match = (
-                                (pd.isna(sales_item) and pd.notna(purch_item)) or
-                                (pd.isna(purch_item) and pd.notna(sales_item)) or
-                                (pd.notna(sales_item) and pd.notna(purch_item) and 
-                                    str(sales_item).strip().lower() == str(purch_item).strip().lower())
+                                (pd.isna(sales_item) and pd.notna(purch_item))
+                                or (pd.isna(purch_item) and pd.notna(sales_item))
+                                or (
+                                    pd.notna(sales_item)
+                                    and pd.notna(purch_item)
+                                    and str(sales_item).strip().lower() == str(purch_item).strip().lower()
+                                )
                             )
-                            
-                            if items_match:                          
-                                # Update all columns except SO and #
+
+                            if items_match:
                                 for col in new_df.columns:
-                                    if col in existing_df.columns and col not in ['SO', '#']:
+                                    if col in existing_df.columns and col not in ["SO", "#"]:
                                         sales_value = existing_df.at[sales_idx, col]
                                         purch_value = new_df.at[purch_idx, col]
-                                        if col in ['შეკვეთის გაკეთების თარიღი', 'Customer', 'შეკვეთილი რაოდენობა']:
-                                            # Always use purchase value if it exists
+                                        if col in ["შეკვეთის გაკეთების თარიღი", "Customer", "შეკვეთილი რაოდენობა"]:
                                             if pd.notna(purch_value):
                                                 existing_df.at[sales_idx, col] = purch_value
                                                 updated_count += 1
                                         else:
-                                            # For other columns, update only if sales value is empty and purchase value exists
                                             if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
                                                 existing_df.at[sales_idx, col] = purch_value
                                                 updated_count += 1
-                # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
+
+                # --- Step 3: Replace only the 'მიმდინარე ' sheet ---
                 if "მიმდინარე " in wb.sheetnames:
                     wb.remove(wb["მიმდინარე "])
                 ws_new = wb.create_sheet("მიმდინარე ")
@@ -350,20 +345,19 @@ def update_excel(new_df: pd.DataFrame) -> None:
                 for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
                     ws_new.append(list(r))
 
-                # --- Step 5: Save workbook to memory ---
+                # --- Step 4: Save workbook to memory ---
                 output = io.BytesIO()
                 wb.save(output)
                 output.seek(0)
 
-                # --- Step 6: Upload back with retry if locked ---
+                # --- Step 5: Upload back with retry if locked ---
                 url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-
-                max_attempts = 10  # up to ~5 minutes wait
+                max_attempts = 10
                 for attempt in range(max_attempts):
                     resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
 
                     if resp.status_code in (423, 409):  # Locked
-                        wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
+                        wait_time = min(30, 2**attempt) + random.uniform(0, 2)
                         print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
                         time.sleep(wait_time)
                         continue
@@ -377,11 +371,23 @@ def update_excel(new_df: pd.DataFrame) -> None:
                     raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
             else:
                 append_dataframe_to_table(new_df)
-        del existing_df
-        del new_df
-        gc.collect()
+
         except Exception as e:
             print(f"❌ Fatal error: {e}")
+
+        finally:
+            if wb:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+            if file_stream:
+                try:
+                    file_stream.close()
+                except Exception:
+                    pass
+            del existing_df
+            del new_df
             gc.collect()
 
 # ----------- MONDAY CHECKING -----------
