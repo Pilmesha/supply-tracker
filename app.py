@@ -377,14 +377,13 @@ def update_excel(new_df: pd.DataFrame) -> None:
                     raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
             else:
                 append_dataframe_to_table(new_df)
-        except Exception as e:
-            print(f"❌ Fatal error: {e}")
         del existing_df
         del new_df
         gc.collect()
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
-        gc.collect()
+        except Exception as e:
+            print(f"❌ Fatal error: {e}")
+            gc.collect()
+
 # ----------- MONDAY CHECKING -----------
 def already_ran_today() -> bool:
     """Check if the daily job already ran today."""
