@@ -12,8 +12,19 @@ from openpyxl import load_workbook
 import threading
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
-
+import gc
+from concurrent.futures import ThreadPoolExecutor
 load_dotenv()
+
+# single session (reuse connections)
+HTTP = requests.Session()
+HTTP.headers.update({"User-Agent": "supply-tracker/1.0"})
+
+# thread pool to avoid unbounded thread creation
+POOL = ThreadPoolExecutor(max_workers=3)  # tune 2-4 on free tier
+
+# single lock to avoid concurrent workbook uploads
+EXCEL_LOCK = threading.Lock()
 
 CLIENT_ID = os.getenv('CLIENT_ID')
 CLIENT_SECRET = os.getenv('CLIENT_SECRET')
@@ -41,7 +52,7 @@ def refresh_access_token()-> str:
         "client_secret": CLIENT_SECRET,
         "grant_type": "refresh_token"
     }
-    resp = requests.post(url, params=params).json()
+    resp = HTTP.post(url, params=params).json()
     ACCESS_TOKEN = resp["access_token"]
     return ACCESS_TOKEN
 def verify_zoho_signature(request, expected_module):
@@ -74,7 +85,7 @@ def One_Drive_Auth() -> str:
         "scope": "https://graph.microsoft.com/.default"
     }
 
-    resp = requests.post(url, data=data)
+    resp = HTTP.post(url, data=data)
     ACCESS_TOKEN_DRIVE = resp.json().get("access_token")
     return ACCESS_TOKEN_DRIVE
 # ----------- GET DF -----------
@@ -85,7 +96,7 @@ def get_sales_order_df(order_id: str) -> pd.DataFrame:
         "X-com-zoho-inventory-organizationid": ORG_ID
     }
 
-    response = requests.get(url, headers=headers)
+    response = HTTP.get(url, headers=headers)
     response.raise_for_status()
     salesorder = response.json().get("salesorder", {})
 
@@ -102,7 +113,7 @@ def get_sales_order_df(order_id: str) -> pd.DataFrame:
         # Lookup item details from Items API
         if item_id:
             item_url = f"https://www.zohoapis.com/inventory/v1/items/{item_id}"
-            item_resp = requests.get(item_url, headers=headers)
+            item_resp = HTTP.get(item_url, headers=headers)
             if item_resp.status_code == 200:
                 item_details = item_resp.json().get("item", {})
                 manufacturer = (
@@ -127,7 +138,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         "X-com-zoho-inventory-organizationid": ORG_ID
     }
 
-    response = requests.get(url, headers=headers)
+    response = HTTP.get(url, headers=headers)
     response.raise_for_status()
     purchaseorder = response.json().get("purchaseorder", {})
     po_number = purchaseorder.get("purchaseorder_number")
@@ -156,7 +167,7 @@ def get_used_range(sheet_name="მიმდინარე "):
     """Get the used range of a worksheet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    resp = requests.get(url, headers=headers, params={"valuesOnly": "false"})
+    resp = HTTP.get(url, headers=headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
 def create_table_if_not_exists(range_address, has_headers=True, retries=3):
@@ -164,7 +175,7 @@ def create_table_if_not_exists(range_address, has_headers=True, retries=3):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-    resp = requests.get(url, headers=headers)
+    resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     existing_tables = resp.json().get("value", [])
     if existing_tables:
@@ -176,7 +187,7 @@ def create_table_if_not_exists(range_address, has_headers=True, retries=3):
     payload = {"address": range_address, "hasHeaders": has_headers}
 
     for attempt in range(retries):
-        resp = requests.post(url_add, headers=headers, json=payload)
+        resp = HTTP.post(url_add, headers=headers, json=payload)
         if resp.status_code in [200, 201]:
             table = resp.json()
             print(f"✅ Created table '{table['name']}' at range {range_address}")
@@ -190,7 +201,7 @@ def get_table_columns(table_name):
     """Fetch column names of an existing Excel table"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    resp = requests.get(url, headers=headers)
+    resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
 # ----------- MAIN LOGIC -----------
@@ -232,7 +243,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
     payload = {"values": rows}
-    resp = requests.post(url, headers=headers, json=payload)
+    resp = HTTP.post(url, headers=headers, json=payload)
     if resp.status_code in [200, 201]:
         print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
         return resp.json()
@@ -246,115 +257,134 @@ def update_excel(new_df: pd.DataFrame) -> None:
     If it's a purchase order (has Reference column), matches with existing sales orders.
     Numbering (#) restarts from 1 for every new batch of rows added.
     """
-    try:
-        max_wait_minutes = 10  # allow long waits since this is background
-        deadline = time.time() + max_wait_minutes * 60
-        while time.time() < deadline:
-            try:
-                # --- Step 1: Download current file from OneDrive ---
-                url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-                headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-                resp = requests.get(url_download, headers=headers)
-                resp.raise_for_status()
-                file_stream = io.BytesIO(resp.content)
-                wb = load_workbook(file_stream)
-                if "მიმდინარე " in wb.sheetnames:
-                    ws = wb["მიმდინარე "]
-                    existing_df = pd.DataFrame(ws.values)
-                    existing_df.columns = existing_df.iloc[0]  # first row as header
-                    existing_df = existing_df[1:]              # drop header row
-                else:
-                    existing_df = pd.DataFrame()
-                break
-            except Exception as e:
-                print(f"⚠️ Error downloading file: {e}, retrying...")
-        else:
-            print("❌ Gave up downloading file after 10 minutes")
-            return
-        # ---Check if it's a purchase order (has Reference column) ---
-        if new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any():
-            # Create a mapping from Reference to rows in purchase data
-            purch_ref_to_rows = {}
-            for idx, row in new_df.iterrows():
-                ref = row['Reference']
-                if pd.notna(ref):
-                    refs = [r.strip() for r in str(ref).split(',') if r.strip()]
-                    for r in refs:
-                        if r not in purch_ref_to_rows:
-                            purch_ref_to_rows[r] = []
-                        purch_ref_to_rows[r].append(idx)
-            # Update existing sales orders with purchase data where references AND items match
-            updated_count = 0
-            for sales_idx, sales_row in existing_df.iterrows():
-                so_value = sales_row['SO']
-                sales_item = sales_row['Item']
-                
-                if pd.notna(so_value) and so_value in purch_ref_to_rows:
-                    # Find matching purchase order items for this SO
-                    for purch_idx in purch_ref_to_rows[so_value]:
-                        purch_item = new_df.at[purch_idx, 'Item']
-                        
-                        # Check if items match (or if either is empty/NaN)
-                        items_match = (
-                            (pd.isna(sales_item) and pd.notna(purch_item)) or
-                            (pd.isna(purch_item) and pd.notna(sales_item)) or
-                            (pd.notna(sales_item) and pd.notna(purch_item) and 
-                                str(sales_item).strip().lower() == str(purch_item).strip().lower())
-                        )
-                        
-                        if items_match:                          
-                            # Update all columns except SO and #
-                            for col in new_df.columns:
-                                if col in existing_df.columns and col not in ['SO', '#']:
-                                    sales_value = existing_df.at[sales_idx, col]
-                                    purch_value = new_df.at[purch_idx, col]
-                                    if col in ['შეკვეთის გაკეთების თარიღი', 'Customer', 'შეკვეთილი რაოდენობა']:
-                                        # Always use purchase value if it exists
-                                        if pd.notna(purch_value):
-                                            existing_df.at[sales_idx, col] = purch_value
-                                            updated_count += 1
-                                    else:
-                                        # For other columns, update only if sales value is empty and purchase value exists
-                                        if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
-                                            existing_df.at[sales_idx, col] = purch_value
-                                            updated_count += 1
-            # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
-            if "მიმდინარე " in wb.sheetnames:
-                wb.remove(wb["მიმდინარე "])
-            ws_new = wb.create_sheet("მიმდინარე ")
+    with EXCEL_LOCK:
+        try:
+                        # --- Step 1: Download current file from OneDrive ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
-            for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
-                ws_new.append(list(r))
-
-            # --- Step 5: Save workbook to memory ---
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
-
-            # --- Step 6: Upload back with retry if locked ---
-            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-
-            max_attempts = 10  # up to ~5 minutes wait
+            max_attempts = 6
             for attempt in range(max_attempts):
-                resp = requests.put(url_upload, headers=headers, data=output.getvalue())
-
-                if resp.status_code in (423, 409):  # Locked
-                    wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
-                    print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-                    time.sleep(wait_time)
-                    continue
-
-                resp.raise_for_status()
-                range_address = get_used_range("მიმდინარე ")
-                table_name = create_table_if_not_exists(range_address)
-                print(f"✅ Upload successful. Created table named {table_name}")
-                return
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    try:
+                        wb = load_workbook(file_stream)
+                        if "მიმდინარე " in wb.sheetnames:
+                            ws = wb["მიმდინარე "]
+                            existing_df = pd.DataFrame(ws.values)
+                            existing_df.columns = existing_df.iloc[0]  # first row as header
+                            existing_df = existing_df[1:]              # drop header row
+                        else:
+                            existing_df = pd.DataFrame()
+                    finally:
+                        try:
+                            wb.close()
+                        except Exception:
+                            pass
+                        try:
+                            file_stream.close()
+                        except Exception:
+                            pass
+                    break
+                except Exception as e:
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ Error downloading file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                    time.sleep(wait)
             else:
-                raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
-        else:
-            append_dataframe_to_table(new_df)
+                print("❌ Gave up downloading file after attempts")
+                return
+            # ---Check if it's a purchase order (has Reference column) ---
+            if new_df["Reference"].apply(lambda x: any(r.strip() in set(existing_df["SO"]) for r in str(x).split(',')) if pd.notna(x) else False).any():
+                # Create a mapping from Reference to rows in purchase data
+                purch_ref_to_rows = {}
+                for idx, row in new_df.iterrows():
+                    ref = row['Reference']
+                    if pd.notna(ref):
+                        refs = [r.strip() for r in str(ref).split(',') if r.strip()]
+                        for r in refs:
+                            if r not in purch_ref_to_rows:
+                                purch_ref_to_rows[r] = []
+                            purch_ref_to_rows[r].append(idx)
+                # Update existing sales orders with purchase data where references AND items match
+                updated_count = 0
+                for sales_idx, sales_row in existing_df.iterrows():
+                    so_value = sales_row['SO']
+                    sales_item = sales_row['Item']
+                    
+                    if pd.notna(so_value) and so_value in purch_ref_to_rows:
+                        # Find matching purchase order items for this SO
+                        for purch_idx in purch_ref_to_rows[so_value]:
+                            purch_item = new_df.at[purch_idx, 'Item']
+                            
+                            # Check if items match (or if either is empty/NaN)
+                            items_match = (
+                                (pd.isna(sales_item) and pd.notna(purch_item)) or
+                                (pd.isna(purch_item) and pd.notna(sales_item)) or
+                                (pd.notna(sales_item) and pd.notna(purch_item) and 
+                                    str(sales_item).strip().lower() == str(purch_item).strip().lower())
+                            )
+                            
+                            if items_match:                          
+                                # Update all columns except SO and #
+                                for col in new_df.columns:
+                                    if col in existing_df.columns and col not in ['SO', '#']:
+                                        sales_value = existing_df.at[sales_idx, col]
+                                        purch_value = new_df.at[purch_idx, col]
+                                        if col in ['შეკვეთის გაკეთების თარიღი', 'Customer', 'შეკვეთილი რაოდენობა']:
+                                            # Always use purchase value if it exists
+                                            if pd.notna(purch_value):
+                                                existing_df.at[sales_idx, col] = purch_value
+                                                updated_count += 1
+                                        else:
+                                            # For other columns, update only if sales value is empty and purchase value exists
+                                            if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
+                                                existing_df.at[sales_idx, col] = purch_value
+                                                updated_count += 1
+                # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
+                if "მიმდინარე " in wb.sheetnames:
+                    wb.remove(wb["მიმდინარე "])
+                ws_new = wb.create_sheet("მიმდინარე ")
+
+                for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
+                    ws_new.append(list(r))
+
+                # --- Step 5: Save workbook to memory ---
+                output = io.BytesIO()
+                wb.save(output)
+                output.seek(0)
+
+                # --- Step 6: Upload back with retry if locked ---
+                url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+
+                max_attempts = 10  # up to ~5 minutes wait
+                for attempt in range(max_attempts):
+                    resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+
+                    if resp.status_code in (423, 409):  # Locked
+                        wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
+                        print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                        continue
+
+                    resp.raise_for_status()
+                    range_address = get_used_range("მიმდინარე ")
+                    table_name = create_table_if_not_exists(range_address)
+                    print(f"✅ Upload successful. Created table named {table_name}")
+                    return
+                else:
+                    raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
+            else:
+                append_dataframe_to_table(new_df)
+        except Exception as e:
+            print(f"❌ Fatal error: {e}")
+        del existing_df
+        del new_df
+        gc.collect()
     except Exception as e:
         print(f"❌ Fatal error: {e}")
+        gc.collect()
 # ----------- MONDAY CHECKING -----------
 def already_ran_today() -> bool:
     """Check if the daily job already ran today."""
@@ -390,7 +420,7 @@ def fetch_recent_orders() -> list[dict]:
         "date_start": from_date,
         "date_end": to_date
         }
-        response = requests.get(url, headers=headers, params=params)
+        response = HTTP.get(url, headers=headers, params=params)
         response.raise_for_status()
         orders = response.json().get(doc_type, [])
         for order in orders:
@@ -415,7 +445,7 @@ def monday_job():
             # --- Step 1: Download current file from OneDrive ---
             url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
             headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-            resp = requests.get(url_download, headers=headers)
+            resp = HTTP.get(url_download, headers=headers)
             resp.raise_for_status()
             file_stream = io.BytesIO(resp.content)
             wb = load_workbook(file_stream)
@@ -451,7 +481,7 @@ def monday_job():
 
             max_attempts = 10  # up to ~5 minutes wait
             for attempt in range(max_attempts):
-                resp = requests.put(url_upload, headers=headers, data=output.getvalue())
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
 
                 if resp.status_code in (423, 409):  # Locked
                     wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
@@ -469,7 +499,10 @@ def monday_job():
                     append_dataframe_to_table(get_sales_order_df(order['order_id']))
                 else:
                     One_Drive_Auth()
-                    threading.Thread(target=update_excel, args=(get_purchase_order_df(order['order_id']),), daemon=True).start()
+                    PO_df = get_purchase_order_df(order['order_id'])
+                    PO_df_copy = PO_df.copy()   # avoid referencing outer objects
+                    PO_df = None
+                    PO_future = POOL.submit(update_excel, PO_df_copy)
         else:
             print("ℹ️ No new Saturday orders found, skipping cleanup.")
         update_marker()
@@ -508,7 +541,10 @@ def purchase_webhook():
         return "Missing order ID", 400
 
     try:
-        threading.Thread(target=update_excel, args=(get_purchase_order_df(order_id),), daemon=True).start()
+        PO_df = get_purchase_order_df(order_id)
+        PO_df_copy = PO_df.copy()   # avoid referencing outer objects
+        PO_df = None
+        PO_future = POOL.submit(update_excel, PO_df_copy)
         return "OK", 200
     except Exception as e:
         
