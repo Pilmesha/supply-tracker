@@ -13,7 +13,7 @@ import threading
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import gc
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64, re, pdfplumber
 load_dotenv()
 
@@ -22,7 +22,7 @@ HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "supply-tracker/1.0", "Content-Type": "application/x-www-form-urlencoded"})
 
 # thread pool to avoid unbounded thread creation
-POOL = ThreadPoolExecutor(max_workers=3)  # tune 2-4 on free tier
+POOL = ThreadPoolExecutor(max_workers=4)  # tune 2-4 on free tier
 
 # single lock to avoid concurrent workbook uploads
 EXCEL_LOCK = threading.Lock()
@@ -731,20 +731,20 @@ def create_subscription_for_user(mailbox):
 def initialize_subscriptions():
     print("Setting up subscriptions...")
     clear_all_subscriptions()
-    
+    futures = []
+    for mailbox in MAILBOXES:
+        futures.append(POOL.submit(create_subscription_for_user, mailbox))
+
     successful_subs = []
-    
-    for i, mail in enumerate(MAILBOXES):
-        print(f"\n--- Creating subscription {i+1}/{len(MAILBOXES)} for {mail} ---")
-        result = create_subscription_for_user(mail)
-        
-        if result:
-            successful_subs.append((mail, result.get('id')))
-        
-        # Wait 20 seconds between subscriptions to allow validation
-        if i < len(MAILBOXES) - 1:
-            print("Waiting 20 seconds for next subscription...")
-    
+    for future in as_completed(futures):
+        try:
+            result = future.result()
+            if result:
+                mailbox = result.get('resource').split('/')[1]  # extract mailbox from resource
+                successful_subs.append((mailbox, result.get('id')))
+        except Exception as e:
+            print(f"❌ Error creating subscription: {e}")
+
     print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
     return successful_subs
 def renew_subscription(sub_id, new_expiration_minutes=4230):
@@ -839,14 +839,14 @@ def webhook():
         return jsonify({"status": "active"}), 200
 @app.route("/init", methods=["GET", "POST"])
 def init_subscriptions():
-    """Manual endpoint to initialize subscriptions"""
+    """Manual endpoint to initialize subscriptions in background"""
     try:
-        print("🔄 Starting subscription initialization...")
-        results = initialize_subscriptions()
+        print("🔄 Starting subscription initialization in background...")
+        POOL.submit(init_subscriptions)
+        # Immediately return so Render worker does not timeout
         return jsonify({
             "status": "success",
-            "message": f"Initialized {len(results)} subscriptions",
-            "data": results
+            "message": "Subscription initialization started in background"
         }), 200
     except Exception as e:
         print(f"❌ Initialization failed: {e}")
