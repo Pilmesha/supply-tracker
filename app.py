@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify, make_response
 import pandas as pd
 from dotenv import load_dotenv
 import hmac
@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import gc
 from concurrent.futures import ThreadPoolExecutor
+import base64, re, pdfplumber
 load_dotenv()
 
 # single session (reuse connections)
@@ -41,6 +42,16 @@ DOC_TYPES = ["salesorders","purchaseorders"]
 
 MARKER_DIR = "/var/lib/myapp"   # persistent location
 MARKER_FILE = os.path.join(MARKER_DIR, "last_run.txt")
+
+MAILBOXES = [
+    "info@vortex.ge",
+    "archil@vortex.ge",
+    "Logistics@vortex.ge",
+    "hach@vortex.ge"
+]
+WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
+GRAPH_URL = "https://graph.microsoft.com/v1.0"
+
 app = Flask(__name__)
 # ----------- AUTH -----------
 def refresh_access_token()-> str:
@@ -511,9 +522,7 @@ def monday_job():
         else:
             print("ℹ️ No new Saturday orders found, skipping cleanup.")
         update_marker()
-scheduler = BackgroundScheduler()
-scheduler.add_job(monday_job, "cron", day_of_week="mon", hour=6)  # Monday 08:00 UTC
-scheduler.start()
+
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
@@ -554,7 +563,330 @@ def purchase_webhook():
     except Exception as e:
         
         return f"Processing error: {e}", 500
+
+# -----------MAIL WEBHOOK -----------
+def get_headers():
+    return {"Authorization": f"Bearer {ACCESS_TOKEN or refresh_access_token()}", "Content-Type": "application/json"}
+def process_message(mailbox, message_id, message_date):
+    print(f"Mailbox: {mailbox}")
+    print(f"message_id: {message_id}")
+    print(f"message_date: {message_date}")
+    with EXCEL_LOCK:
+        file_stream = None
+        wb = None
+        orders_df = pd.DataFrame()
+        # --- Step 1: Download current file from OneDrive ---
+        url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+        max_attempts = 6
+        for attempt in range(max_attempts):
+            try:
+                resp = HTTP.get(url_download, headers=headers, timeout=60)
+                resp.raise_for_status()
+                file_stream = io.BytesIO(resp.content)
+                wb = load_workbook(file_stream)
+
+                if "მიმდინარე " in wb.sheetnames:
+                    ws = wb["მიმდინარე "]
+                    orders_df = pd.DataFrame(ws.values)
+                    orders_df.columns = orders_df.iloc[0]  # first row as header
+                    orders_df = orders_df[1:]              # drop header row
+                else:
+                    orders_df = pd.DataFrame()
+                break
+            except Exception as e:
+                wait = min(5 * (attempt + 1), 30)
+                print(f"⚠️ Error downloading file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                time.sleep(wait)
+        else:
+            print("❌ Gave up downloading file after attempts")
+            return
+        items_df = pd.read_csv("zoho_items.csv")
+        att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+        attachments = requests.get(att_url, headers=get_headers()).json().get('value', [])
+        
+        # 2. Loop over attachments, decode and extract text directly
+        all_text = ""
+        for att in attachments:
+            if 'contentBytes' in att and att['name'].lower().endswith('.pdf'):
+                content = base64.b64decode(att['contentBytes'])
+                with pdfplumber.open(io.BytesIO(content)) as pdf:
+                    for page in pdf.pages:
+                        all_text += (page.extract_text() or "") + "\n"
+        
+        # 3. Extract PO number (first occurrence)
+        po_match = re.search(r"PO-\d+", all_text)
+        po_number = po_match.group(0) if po_match else None
+        
+        if po_number:
+            print("Found PO number")
+            # Filter orders_df for rows with this PO
+            matching_idx = orders_df.index[orders_df["PO"] == po_number]
+
+            for idx in matching_idx:
+                print("Finding matches")
+                code = str(orders_df.at[idx, "Code"])
+                if code in all_text:
+                    hs_row = items_df[items_df["sku"] == code]
+                    hs_code = hs_row["HS_Code"].iloc[0] if not hs_row.empty else None
+
+                    if pd.isna(orders_df.at[idx, "HS Code"]) or orders_df.at[idx, "HS Code"] == "":
+                        orders_df.at[idx, "HS Code"] = hs_code
+                        print("Filled HS")
+
+                    if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
+                        orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = message_date
+                        print("Filled date")
+
+        # 🟢 after loop, update sheet once:
+        if "მიმდინარე " in wb.sheetnames:
+            wb.remove(wb["მიმდინარე "])
+        ws_new = wb.create_sheet("მიმდინარე ")
+
+        for r in [orders_df.columns.tolist()] + orders_df.values.tolist():
+            ws_new.append(list(r))
+
+        # Save workbook to memory
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        # Upload back
+        url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+            if resp.status_code in (423, 409):  # Locked
+                wait_time = min(30, 2**attempt) + random.uniform(0, 2)
+                print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+
+            resp.raise_for_status()
+            range_address = get_used_range("მიმდინარე ")
+            table_name = create_table_if_not_exists(range_address)
+            print(f"✅ Upload successful. Created table named {table_name}")
+            del orders_df
+            gc.collect()
+            return
+def clear_all_subscriptions():
+    headers = get_headers()
+    subs_url = f"{GRAPH_URL}/subscriptions"
+
+    resp = HTTP.get(subs_url, headers=headers)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to list subscriptions: {resp.text}")
+
+    subs = resp.json().get("value", [])
+    print(f"Found {len(subs)} existing subscriptions")
+    for sub in subs:
+        sub_id = sub["id"]
+        del_url = f"{GRAPH_URL}/subscriptions/{sub_id}"
+        dresp = requests.delete(del_url, headers=headers)
+        if dresp.status_code not in (202, 204):
+            print(f"Could not delete {sub_id}: {dresp.text}")
+        else:
+            print(f"Deleted subscription {sub_id}")
+def create_subscription_for_user(mailbox):
+    expiration_time = (datetime.utcnow() + timedelta(minutes=4230)).isoformat() + "Z"
+    data = {
+        "changeType": "created",
+        "notificationUrl": WEBHOOK_URL,
+        "resource": f"users/{mailbox}/messages",
+        "expirationDateTime": expiration_time,
+        "clientState": "secretClientValue"
+    }
+    
+    print(f"Creating subscription for {mailbox}...")
+    response = requests.post(
+        f"{GRAPH_URL}/subscriptions", 
+        headers=get_headers(), 
+        json=data
+    )
+    
+    if response.status_code == 201:
+        sub_info = response.json()
+        print(f"✅ Created subscription for {mailbox}: {sub_info['id']}")
+        return sub_info
+    elif response.status_code == 202:  # Accepted but validating
+        print(f"⏳ Subscription for {mailbox} is being validated...")
+        # You might need to check subscription status later
+        return response.json()
+    else:
+        print(f"❌ Failed to create subscription for {mailbox}: {response.status_code}")
+        return None
+def initialize_subscriptions():
+    print("Setting up subscriptions...")
+    clear_all_subscriptions()
+    
+    successful_subs = []
+    
+    for i, mail in enumerate(MAILBOXES):
+        print(f"\n--- Creating subscription {i+1}/{len(MAILBOXES)} for {mail} ---")
+        result = create_subscription_for_user(mail)
+        
+        if result:
+            successful_subs.append((mail, result.get('id')))
+        
+        # Wait 20 seconds between subscriptions to allow validation
+        if i < len(MAILBOXES) - 1:
+            print("Waiting 20 seconds for next subscription...")
+            time.sleep(20)
+    
+    print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
+    return successful_subs
+def renew_subscription(sub_id, new_expiration_minutes=4230):
+    """
+    Extend an existing subscription's expiration date.
+    Returns True if successful.
+    """
+    headers = get_headers()
+    new_expiration = (datetime.utcnow() + timedelta(minutes=new_expiration_minutes)).isoformat() + "Z"
+
+    patch_url = f"{GRAPH_URL}/subscriptions/{sub_id}"
+    payload = {
+        "expirationDateTime": new_expiration
+    }
+
+    resp = requests.patch(patch_url, headers=headers, json=payload)
+    if resp.status_code == 200:
+        print(f"🔄 Renewed subscription {sub_id} until {new_expiration}")
+        return True
+    else:
+        print(f"❌ Failed to renew subscription {sub_id}: {resp.status_code} - {resp.text}")
+        return False
+def renew_all_subscriptions(minutes=4230):
+    headers = get_headers()
+    resp = requests.get(f"{GRAPH_URL}/subscriptions", headers=headers)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to list subscriptions: {resp.text}")
+
+    subs = resp.json().get("value", [])
+    print(f"Found {len(subs)} subscriptions to renew")
+
+    for sub in subs:
+        sub_id = sub["id"]
+        # Optional: only renew if expiring soon
+        exp_str = sub.get("expirationDateTime")
+        if exp_str:
+            exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+            if exp_dt - datetime.utcnow() < timedelta(hours=24):
+                renew_subscription(sub_id, minutes)
+            else:
+                print(f"⏳ Subscription {sub_id} still valid until {exp_dt}")
+        else:
+            # No expiration? Just renew
+            renew_subscription(sub_id, minutes)
+@app.route("/webhook", methods=["GET","POST"]) 
+def webhook(): 
+    # Handle subscription validation 
+    validation_token = request.args.get("validationToken")
+    if validation_token:
+        print(f"Validation request received: {validation_token}")
+        # Respond immediately with the token
+        resp = make_response(validation_token, 200)
+        resp.mimetype = "text/plain"
+        return resp
+    if request.method == "POST":
+        try: 
+            data = request.json 
+            print(f"Webhook triggered with {len(data.get('value', []))} notifications") 
+            # Pattern to match in email subjects
+            pattern = re.compile(r'(?i)Order\s*Confirmation.*PO-\d+') 
+            # Process each notification 
+            for notification in data.get("value", []): 
+                message_url = f"https://graph.microsoft.com/v1.0/{notification['resource']}" 
+                message_response = HTTP.get(message_url, headers=get_headers()) 
+                if message_response.status_code != 200: 
+                    print(f"Error fetching message: {message_response.status_code}") 
+                    continue 
+                message = message_response.json() 
+                subject = message.get('subject', '') 
+                print(f"Checking subject: {subject!r}") 
+                if pattern.search(subject): 
+                    print("✅ Pattern matched - processing message") 
+                    path_parts = notification["resource"].split('/') 
+                    if len(path_parts) >= 4 and path_parts[0] == "Users": 
+                        mailbox = path_parts[1] 
+                    else: 
+                        mailbox = "unknown" 
+                        print(f"Warning: Unexpected path format: {notification['resource']}") 
+                    message_id = message.get('id') 
+                    message_date = message.get('receivedDateTime') 
+                    print(f"Extracted - Mailbox: {mailbox}, Message ID: {message_id}, Date: {message_date}")
+                    process_message(mailbox, message_id, message_date) 
+                else: 
+                    print("❌ Pattern not found - skipping message") 
+            
+            return jsonify({"status": "accepted"}), 202 
+            
+        except Exception as e: 
+            print(f"❌ Error processing webhook: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+    else:
+        return jsonify({"status": "active"}), 200
+@app.route("/init", methods=["GET", "POST"])
+def init_subscriptions():
+    """Manual endpoint to initialize subscriptions"""
+    try:
+        print("🔄 Starting subscription initialization...")
+        results = initialize_subscriptions()
+        return jsonify({
+            "status": "success",
+            "message": f"Initialized {len(results)} subscriptions",
+            "data": results
+        }), 200
+    except Exception as e:
+        print(f"❌ Initialization failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+@app.route("/renew", methods=["GET", "POST"])
+def renew_subscriptions_endpoint():
+    """Manually renew all subscriptions that are about to expire"""
+    try:
+        renew_all_subscriptions()
+        return jsonify({"status": "success", "message": "Subscriptions renewed"}), 200
+    except Exception as e:
+        print(f"❌ Renewal failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+@app.route("/subscriptions", methods=["GET"])
+def list_subscriptions():
+    """List all current subscriptions"""
+    try:
+        headers = get_headers()
+        resp = HTTP.get(f"{GRAPH_URL}/subscriptions", headers=headers)
+        if resp.status_code == 200:
+            subs = resp.json().get("value", [])
+            return jsonify({
+                "status": "success",
+                "count": len(subs),
+                "subscriptions": subs
+            }), 200
+        else:
+            return jsonify({"status": "error", "message": resp.text}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+@app.route("/cleanup", methods=["GET", "POST"])
+def cleanup_subscriptions():
+    """Clean up duplicate subscriptions"""
+    try:
+        print("🧹 Cleaning up subscriptions...")
+        clear_all_subscriptions()  # This will remove ALL subscriptions
+        return jsonify({"status": "success", "message": "All subscriptions cleared"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 # ----------- HEALTH CHECK -----------
 @app.route("/health")
 def health():
     return {'health':'ok'}
+
+# ----------- SCHEDULERS -----------
+scheduler = BackgroundScheduler()
+scheduler.add_job(monday_job, "cron", day_of_week="mon", hour=7)  # Monday 08:00 UTC
+scheduler.add_job(
+    renew_all_subscriptions, 
+    "interval", 
+    hours=12,   # you can make this smaller (e.g. 6h) if you want safer margin
+    id="renew_subscriptions"
+)
+scheduler.start()
