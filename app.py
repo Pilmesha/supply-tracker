@@ -97,19 +97,13 @@ def One_Drive_Auth() -> str:
     }
     try:
         resp = HTTP.post(url, data=data)
-        print(f"Response status: {resp.status_code}")
-        print(f"Response headers: {dict(resp.headers)}")
-        print(f"Response body: {resp.text}")  # This will show what's actually returned
-        
         resp.raise_for_status()
-        
         response_json = resp.json()
         print(f"Parsed JSON: {response_json}")
         
         ACCESS_TOKEN_DRIVE = response_json.get("access_token")
         
         if ACCESS_TOKEN_DRIVE:
-            print(f"Token preview: {ACCESS_TOKEN_DRIVE[:50]}...")  # Show first 50 chars
             return ACCESS_TOKEN_DRIVE
         else:
             print("No access_token in response!")
@@ -751,7 +745,6 @@ def initialize_subscriptions():
         # Wait 20 seconds between subscriptions to allow validation
         if i < len(MAILBOXES) - 1:
             print("Waiting 20 seconds for next subscription...")
-            time.sleep(3)
     
     print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
     return successful_subs
