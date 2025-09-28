@@ -96,10 +96,25 @@ def One_Drive_Auth() -> str:
         "scope": "https://graph.microsoft.com/.default"
     }
     try:
-        resp = HTTP.post(url, json=data)
+        resp = HTTP.post(url, data=data)
+        print(f"Response status: {resp.status_code}")
+        print(f"Response headers: {dict(resp.headers)}")
+        print(f"Response body: {resp.text}")  # This will show what's actually returned
+        
         resp.raise_for_status()
-        ACCESS_TOKEN_DRIVE = resp.json().get("access_token")
-        return ACCESS_TOKEN_DRIVE
+        
+        response_json = resp.json()
+        print(f"Parsed JSON: {response_json}")
+        
+        ACCESS_TOKEN_DRIVE = response_json.get("access_token")
+        
+        if ACCESS_TOKEN_DRIVE:
+            print(f"Token preview: {ACCESS_TOKEN_DRIVE[:50]}...")  # Show first 50 chars
+            return ACCESS_TOKEN_DRIVE
+        else:
+            print("No access_token in response!")
+            return None
+            
     except Exception as e:
         print(f"Error getting access token: {e}")
         return None
