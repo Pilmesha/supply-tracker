@@ -526,6 +526,7 @@ def monday_job():
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
+
 # ----------- SALES ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/sales", methods=["POST"])
 def sales_webhook():
@@ -543,6 +544,7 @@ def sales_webhook():
         return "OK", 200
     except Exception as e:
         return f"Processing error: {e}", 500
+
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
@@ -566,7 +568,7 @@ def purchase_webhook():
 
 # -----------MAIL WEBHOOK -----------
 def get_headers():
-    return {"Authorization": f"Bearer {ACCESS_TOKEN or refresh_access_token()}", "Content-Type": "application/json"}
+    return {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}", "Content-Type": "application/json"}
 def process_message(mailbox, message_id, message_date):
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
