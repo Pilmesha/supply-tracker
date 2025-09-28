@@ -95,10 +95,14 @@ def One_Drive_Auth() -> str:
         "client_secret": CLIENT_SECRET_DRIVE,
         "scope": "https://graph.microsoft.com/.default"
     }
-
-    resp = HTTP.post(url, data=data)
-    ACCESS_TOKEN_DRIVE = resp.json().get("access_token")
-    return ACCESS_TOKEN_DRIVE
+    try:
+        resp = HTTP.post(url, data=data)
+        resp.raise_for_status()
+        ACCESS_TOKEN_DRIVE = resp.json().get("access_token")
+        return ACCESS_TOKEN_DRIVE
+    except Exception as e:
+        print(f"Error getting access token: {e}")
+        return None
 # ----------- GET DF -----------
 def get_sales_order_df(order_id: str) -> pd.DataFrame:
     url = f"https://www.zohoapis.com/inventory/v1/salesorders/{order_id}"
@@ -701,7 +705,7 @@ def create_subscription_for_user(mailbox):
     }
     
     print(f"Creating subscription for {mailbox}...")
-    response = requests.post(
+    response = HTTP.post(
         f"{GRAPH_URL}/subscriptions", 
         headers=get_headers(), 
         json=data
@@ -751,7 +755,7 @@ def renew_subscription(sub_id, new_expiration_minutes=4230):
         "expirationDateTime": new_expiration
     }
 
-    resp = requests.patch(patch_url, headers=headers, json=payload)
+    resp = HTTP.patch(patch_url, headers=headers, json=payload)
     if resp.status_code == 200:
         print(f"🔄 Renewed subscription {sub_id} until {new_expiration}")
         return True
@@ -760,7 +764,7 @@ def renew_subscription(sub_id, new_expiration_minutes=4230):
         return False
 def renew_all_subscriptions(minutes=4230):
     headers = get_headers()
-    resp = requests.get(f"{GRAPH_URL}/subscriptions", headers=headers)
+    resp = HTTP.get(f"{GRAPH_URL}/subscriptions", headers=headers)
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to list subscriptions: {resp.text}")
 
