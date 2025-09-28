@@ -99,7 +99,6 @@ def One_Drive_Auth() -> str:
         resp = HTTP.post(url, data=data)
         resp.raise_for_status()
         response_json = resp.json()
-        print(f"Parsed JSON: {response_json}")
         
         ACCESS_TOKEN_DRIVE = response_json.get("access_token")
         
