@@ -729,24 +729,25 @@ def create_subscription_for_user(mailbox):
         print(f"❌ Failed to create subscription for {mailbox}: {response.status_code} {response.text}")
         return None
 def initialize_subscriptions():
-    print("Setting up subscriptions...")
-    clear_all_subscriptions()
-    futures = []
-    for mailbox in MAILBOXES:
-        futures.append(POOL.submit(create_subscription_for_user, mailbox))
+    with app.app_context():
+        print("Setting up subscriptions...")
+        clear_all_subscriptions()
+        futures = []
+        for mailbox in MAILBOXES:
+            futures.append(POOL.submit(create_subscription_for_user, mailbox))
 
-    successful_subs = []
-    for future in as_completed(futures):
-        try:
-            result = future.result()
-            if result:
-                mailbox = result.get('resource').split('/')[1]  # extract mailbox from resource
-                successful_subs.append((mailbox, result.get('id')))
-        except Exception as e:
-            print(f"❌ Error creating subscription: {e}")
+        successful_subs = []
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    mailbox = result.get('resource').split('/')[1]  # extract mailbox from resource
+                    successful_subs.append((mailbox, result.get('id')))
+            except Exception as e:
+                print(f"❌ Error creating subscription: {e}")
 
-    print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
-    return successful_subs
+        print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
+        return successful_subs
 def renew_subscription(sub_id, new_expiration_minutes=4230):
     """
     Extend an existing subscription's expiration date.
