@@ -19,7 +19,7 @@ load_dotenv()
 
 # single session (reuse connections)
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": "supply-tracker/1.0"})
+HTTP.headers.update({"User-Agent": "supply-tracker/1.0", "Content-Type": "application/x-www-form-urlencoded"})
 
 # thread pool to avoid unbounded thread creation
 POOL = ThreadPoolExecutor(max_workers=3)  # tune 2-4 on free tier
@@ -734,7 +734,7 @@ def initialize_subscriptions():
         # Wait 20 seconds between subscriptions to allow validation
         if i < len(MAILBOXES) - 1:
             print("Waiting 20 seconds for next subscription...")
-            time.sleep(20)
+            time.sleep(3)
     
     print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
     return successful_subs
