@@ -96,7 +96,7 @@ def One_Drive_Auth() -> str:
         "scope": "https://graph.microsoft.com/.default"
     }
     try:
-        resp = HTTP.post(url, data=data)
+        resp = HTTP.post(url, json=data)
         resp.raise_for_status()
         ACCESS_TOKEN_DRIVE = resp.json().get("access_token")
         return ACCESS_TOKEN_DRIVE
@@ -417,13 +417,11 @@ def already_ran_today() -> bool:
         return last_run == datetime.utcnow().date()
     except ValueError:
         return False
-
 def update_marker():
     """Update marker file to today’s date."""
     os.makedirs(MARKER_DIR, exist_ok=True)
     with open(MARKER_FILE, "w") as f:
         f.write(datetime.utcnow().date().isoformat())
-
 def fetch_recent_orders() -> list[dict]:
     base_url = "https://www.zohoapis.com/inventory/v1"
     result = []
@@ -720,7 +718,7 @@ def create_subscription_for_user(mailbox):
         # You might need to check subscription status later
         return response.json()
     else:
-        print(f"❌ Failed to create subscription for {mailbox}: {response.status_code}")
+        print(f"❌ Failed to create subscription for {mailbox}: {response.status_code} {response.text}")
         return None
 def initialize_subscriptions():
     print("Setting up subscriptions...")
@@ -859,8 +857,7 @@ def renew_subscriptions_endpoint():
 def list_subscriptions():
     """List all current subscriptions"""
     try:
-        headers = get_headers()
-        resp = HTTP.get(f"{GRAPH_URL}/subscriptions", headers=headers)
+        resp = HTTP.get(f"{GRAPH_URL}/subscriptions", headers=get_headers())
         if resp.status_code == 200:
             subs = resp.json().get("value", [])
             return jsonify({
