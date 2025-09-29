@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, current_app
 import pandas as pd
 from dotenv import load_dotenv
 import hmac
@@ -15,12 +15,22 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64, re, pdfplumber
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 load_dotenv()
 
 # single session (reuse connections)
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "supply-tracker/1.0", "Content-Type": "application/x-www-form-urlencoded"})
-
+retry_strategy = Retry(
+    total=5,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+HTTP.mount("https://", adapter)
+HTTP.mount("http://", adapter)
 # thread pool to avoid unbounded thread creation
 POOL = ThreadPoolExecutor(max_workers=4)  # tune 2-4 on free tier
 
@@ -577,6 +587,11 @@ def purchase_webhook():
         return f"Processing error: {e}", 500
 
 # -----------MAIL WEBHOOK -----------
+def safe_request(method, url, **kwargs):
+    """Wrapper to apply a default timeout and route through our retrying session."""
+    timeout = kwargs.pop("timeout", 30)
+    func = getattr(HTTP, method.lower())
+    return func(url, timeout=timeout, **kwargs)
 def get_headers():
     return {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}", "Content-Type": "application/json"}
 def process_message(mailbox, message_id, message_date):
@@ -685,8 +700,7 @@ def process_message(mailbox, message_id, message_date):
 def clear_all_subscriptions():
     headers = get_headers()
     subs_url = f"{GRAPH_URL}/subscriptions"
-
-    resp = HTTP.get(subs_url, headers=headers)
+    resp = safe_request("get", subs_url, headers=headers)
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to list subscriptions: {resp.text}")
 
@@ -695,12 +709,16 @@ def clear_all_subscriptions():
     for sub in subs:
         sub_id = sub["id"]
         del_url = f"{GRAPH_URL}/subscriptions/{sub_id}"
-        dresp = requests.delete(del_url, headers=headers)
+        dresp = safe_request("delete", del_url, headers=headers)
         if dresp.status_code not in (202, 204):
             print(f"Could not delete {sub_id}: {dresp.text}")
         else:
             print(f"Deleted subscription {sub_id}")
 def create_subscription_for_user(mailbox):
+    """
+    Create a subscription. Do NOT block waiting for Graph validation; Graph will call your webhook GET with validationToken.
+    Keep the function thread-safe and idempotent-friendly.
+    """
     expiration_time = (datetime.utcnow() + timedelta(minutes=4230)).isoformat() + "Z"
     data = {
         "changeType": "created",
@@ -709,68 +727,71 @@ def create_subscription_for_user(mailbox):
         "expirationDateTime": expiration_time,
         "clientState": "secretClientValue"
     }
-    
+
     print(f"Creating subscription for {mailbox}...")
-    response = HTTP.post(
-        f"{GRAPH_URL}/subscriptions", 
-        headers=get_headers(), 
-        json=data
-    )
-    
-    if response.status_code == 201:
+    try:
+        response = safe_request("post", f"{GRAPH_URL}/subscriptions", headers=get_headers(), json=data, timeout=30)
+    except Exception as e:
+        print(f"❌ Network error creating subscription for {mailbox}: {e}")
+        return None
+
+    if response.status_code in (200, 201):
         sub_info = response.json()
-        print(f"✅ Created subscription for {mailbox}: {sub_info['id']}")
+        print(f"✅ Created subscription for {mailbox}: {sub_info.get('id')}")
         return sub_info
-    elif response.status_code == 202:  # Accepted but validating
-        print(f"⏳ Subscription for {mailbox} is being validated...")
-        # You might need to check subscription status later
-        return response.json()
+    elif response.status_code == 202:
+        # Accepted. Graph may be validating the endpoint. Return whatever Graph sent.
+        print(f"⏳ Subscription for {mailbox} accepted (202). Graph is validating the notification URL.")
+        try:
+            return response.json()
+        except Exception:
+            return {}
     else:
         print(f"❌ Failed to create subscription for {mailbox}: {response.status_code} {response.text}")
         return None
 def initialize_subscriptions():
-    with app.app_context():
-        print("Setting up subscriptions...")
-        clear_all_subscriptions()
-        futures = []
-        for mailbox in MAILBOXES:
-            futures.append(POOL.submit(create_subscription_for_user, mailbox))
+    """
+    Must be called inside an application context if get_headers/One_Drive_Auth need it.
+    """
+    print("[initialize_subscriptions] Setting up subscriptions...")
+    clear_all_subscriptions()
+    futures = []
+    for mailbox in MAILBOXES:
+        futures.append(POOL.submit(create_subscription_for_user, mailbox))
 
-        successful_subs = []
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result:
-                    mailbox = result.get('resource').split('/')[1]  # extract mailbox from resource
-                    successful_subs.append((mailbox, result.get('id')))
-            except Exception as e:
-                print(f"❌ Error creating subscription: {e}")
+    successful_subs = []
+    for future in as_completed(futures):
+        try:
+            result = future.result()
+            if result:
+                # resource might be in format "users/{mailbox}/messages" - handle robustly
+                resource = result.get('resource', '')
+                parts = resource.split('/')
+                mailbox_name = parts[1] if len(parts) > 1 else None
+                successful_subs.append((mailbox_name or "unknown", result.get('id')))
+        except Exception as e:
+            print(f"❌ Error creating subscription: {e}")
 
-        print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
-        return successful_subs
+    print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
+    return successful_subs
 def renew_subscription(sub_id, new_expiration_minutes=4230):
-    """
-    Extend an existing subscription's expiration date.
-    Returns True if successful.
-    """
     headers = get_headers()
     new_expiration = (datetime.utcnow() + timedelta(minutes=new_expiration_minutes)).isoformat() + "Z"
 
     patch_url = f"{GRAPH_URL}/subscriptions/{sub_id}"
-    payload = {
-        "expirationDateTime": new_expiration
-    }
+    payload = {"expirationDateTime": new_expiration}
 
-    resp = HTTP.patch(patch_url, headers=headers, json=payload)
+    resp = safe_request("patch", patch_url, headers=headers, json=payload, timeout=30)
     if resp.status_code == 200:
         print(f"🔄 Renewed subscription {sub_id} until {new_expiration}")
         return True
     else:
         print(f"❌ Failed to renew subscription {sub_id}: {resp.status_code} - {resp.text}")
         return False
+
 def renew_all_subscriptions(minutes=4230):
     headers = get_headers()
-    resp = HTTP.get(f"{GRAPH_URL}/subscriptions", headers=headers)
+    resp = safe_request("get", f"{GRAPH_URL}/subscriptions", headers=headers)
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to list subscriptions: {resp.text}")
 
@@ -779,7 +800,6 @@ def renew_all_subscriptions(minutes=4230):
 
     for sub in subs:
         sub_id = sub["id"]
-        # Optional: only renew if expiring soon
         exp_str = sub.get("expirationDateTime")
         if exp_str:
             exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
@@ -788,63 +808,84 @@ def renew_all_subscriptions(minutes=4230):
             else:
                 print(f"⏳ Subscription {sub_id} still valid until {exp_dt}")
         else:
-            # No expiration? Just renew
             renew_subscription(sub_id, minutes)
-@app.route("/webhook", methods=["GET","POST"]) 
-def webhook(): 
-    # Handle subscription validation 
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    # Validation: Graph sends GET with validationToken param
     validation_token = request.args.get("validationToken")
     if validation_token:
         print(f"Validation request received: {validation_token}")
-        # Respond immediately with the token
         resp = make_response(validation_token, 200)
         resp.mimetype = "text/plain"
         return resp
+
     if request.method == "POST":
-        try: 
-            data = request.json 
-            print(f"Webhook triggered with {len(data.get('value', []))} notifications") 
-            # Pattern to match in email subjects
-            pattern = re.compile(r'(?i)Order\s*Confirmation.*PO-\d+') 
-            # Process each notification 
-            for notification in data.get("value", []): 
-                message_url = f"https://graph.microsoft.com/v1.0/{notification['resource']}" 
-                message_response = HTTP.get(message_url, headers=get_headers()) 
-                if message_response.status_code != 200: 
-                    print(f"Error fetching message: {message_response.status_code}") 
-                    continue 
-                message = message_response.json() 
-                subject = message.get('subject', '') 
-                print(f"Checking subject: {subject!r}") 
-                if pattern.search(subject): 
-                    print("✅ Pattern matched - processing message") 
-                    path_parts = notification["resource"].split('/') 
-                    if len(path_parts) >= 4 and path_parts[0] == "Users": 
-                        mailbox = path_parts[1] 
-                    else: 
-                        mailbox = "unknown" 
-                        print(f"Warning: Unexpected path format: {notification['resource']}") 
-                    message_id = message.get('id') 
-                    message_date = message.get('receivedDateTime') 
-                    print(f"Extracted - Mailbox: {mailbox}, Message ID: {message_id}, Date: {message_date}")
-                    process_message(mailbox, message_id, message_date) 
-                else: 
-                    print("❌ Pattern not found - skipping message") 
-            
-            return jsonify({"status": "accepted"}), 202 
-            
-        except Exception as e: 
+        try:
+            data = request.json or {}
+            notifications = data.get('value', [])
+            print(f"Webhook triggered with {len(notifications)} notifications")
+
+            # Pattern to match in email subjects (case-insensitive)
+            pattern = re.compile(r'(?i)Order\s*Confirmation.*PO-\d+')
+
+            for notification in notifications:
+                resource = notification.get('resource', '')
+                # fetch the message to get subject & id
+                message_url = f"{GRAPH_URL}/{resource}"
+                message_response = safe_request("get", message_url, headers=get_headers(), timeout=20)
+                if message_response.status_code != 200:
+                    print(f"Error fetching message: {message_response.status_code} - {message_response.text}")
+                    continue
+                message = message_response.json()
+                subject = message.get('subject', '')
+                print(f"Checking subject: {subject!r}")
+                if pattern.search(subject):
+                    print("✅ Pattern matched - scheduling processing")
+                    # parse mailbox robustly
+                    path_parts = resource.split('/')
+                    mailbox = None
+                    try:
+                        # resource typically: users/{user-id}/messages/{message-id}
+                        if len(path_parts) >= 4 and path_parts[0].lower() in ("users", "me"):
+                            mailbox = path_parts[1]
+                        else:
+                            mailbox = "unknown"
+                    except Exception:
+                        mailbox = "unknown"
+                        print(f"Warning: Unexpected resource format: {resource}")
+
+                    message_id = message.get('id')
+                    message_date = message.get('receivedDateTime')
+                    # schedule heavy processing in thread pool
+                    POOL.submit(process_message, mailbox, message_id, message_date)
+                else:
+                    print("❌ Pattern not found - skipping message")
+
+            # return quickly so Graph knows we accepted the notifications
+            return jsonify({"status": "accepted"}), 202
+        except Exception as e:
             print(f"❌ Error processing webhook: {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
     else:
         return jsonify({"status": "active"}), 200
+def _initialize_subscriptions_worker(flask_app):
+    """
+    This wrapper ensures an app_context is present when initialize_subscriptions is run.
+    Submit this wrapper to the ThreadPoolExecutor from a Flask request handler.
+    """
+    with flask_app.app_context():
+        try:
+            initialize_subscriptions()
+        except Exception as e:
+            print(f"❌ initialize_subscriptions_worker exception: {e}")
+
 @app.route("/init", methods=["GET", "POST"])
-def init_subscriptions():
+def init_subscriptions_endpoint():
     """Manual endpoint to initialize subscriptions in background"""
     try:
         print("🔄 Starting subscription initialization in background...")
-        POOL.submit(init_subscriptions)
-        # Immediately return so Render worker does not timeout
+        # Submit worker that establishes app context itself.
+        POOL.submit(_initialize_subscriptions_worker, app)
         return jsonify({
             "status": "success",
             "message": "Subscription initialization started in background"
@@ -852,20 +893,27 @@ def init_subscriptions():
     except Exception as e:
         print(f"❌ Initialization failed: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route("/renew", methods=["GET", "POST"])
 def renew_subscriptions_endpoint():
     """Manually renew all subscriptions that are about to expire"""
     try:
-        renew_all_subscriptions()
-        return jsonify({"status": "success", "message": "Subscriptions renewed"}), 200
+        # Run renewal synchronously or in background depending on your needs.
+        POOL.submit(lambda: (with_app_ctx_call(renew_all_subscriptions)))
+        return jsonify({"status": "success", "message": "Renewal scheduled"}), 200
     except Exception as e:
         print(f"❌ Renewal failed: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+def with_app_ctx_call(fn, *args, **kwargs):
+    """Helper: call fn within app context (for background tasks)"""
+    with app.app_context():
+        return fn(*args, **kwargs)
+
 @app.route("/subscriptions", methods=["GET"])
 def list_subscriptions():
-    """List all current subscriptions"""
     try:
-        resp = HTTP.get(f"{GRAPH_URL}/subscriptions", headers=get_headers())
+        resp = safe_request("get", f"{GRAPH_URL}/subscriptions", headers=get_headers(), timeout=20)
         if resp.status_code == 200:
             subs = resp.json().get("value", [])
             return jsonify({
@@ -877,13 +925,14 @@ def list_subscriptions():
             return jsonify({"status": "error", "message": resp.text}), 400
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route("/cleanup", methods=["GET", "POST"])
 def cleanup_subscriptions():
-    """Clean up duplicate subscriptions"""
     try:
         print("🧹 Cleaning up subscriptions...")
-        clear_all_subscriptions()  # This will remove ALL subscriptions
-        return jsonify({"status": "success", "message": "All subscriptions cleared"}), 200
+        # Run cleanup in background to avoid blocking
+        POOL.submit(lambda: (with_app_ctx_call(clear_all_subscriptions)))
+        return jsonify({"status": "success", "message": "Subscription cleanup scheduled"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 # ----------- HEALTH CHECK -----------
