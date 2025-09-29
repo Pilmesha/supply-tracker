@@ -47,6 +47,7 @@ CLIENT_SECRET_DRIVE = os.getenv('CLIENT_SECRET_DRIVE')
 DRIVE_ID = os.getenv('DRIVE_ID')
 FILE_ID = os.getenv('FILE_ID')
 ACCESS_TOKEN_DRIVE = None
+ACCESS_TOKEN_EXPIRY = None
 ACCESS_TOKEN = None
 DOC_TYPES = ["salesorders","purchaseorders"]
 
@@ -96,9 +97,8 @@ def verify_zoho_signature(request, expected_module):
     
     return hmac.compare_digest(received_sign, expected_sign)
 def One_Drive_Auth() -> str:
-    global ACCESS_TOKEN_DRIVE
+    global ACCESS_TOKEN_DRIVE, ACCESS_TOKEN_EXPIRY
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-
     data = {
         "grant_type": "client_credentials",
         "client_id": CLIENT_ID_DRIVE,
@@ -106,21 +106,31 @@ def One_Drive_Auth() -> str:
         "scope": "https://graph.microsoft.com/.default"
     }
     try:
-        resp = HTTP.post(url, data=data)
+        resp = HTTP.post(url, data=data, timeout=30)
         resp.raise_for_status()
         response_json = resp.json()
         
         ACCESS_TOKEN_DRIVE = response_json.get("access_token")
+        expires_in = response_json.get("expires_in", 3600)
+        ACCESS_TOKEN_EXPIRY = datetime.utcnow() + timedelta(seconds=expires_in - 60)  # refresh 1 min early
         
         if ACCESS_TOKEN_DRIVE:
             return ACCESS_TOKEN_DRIVE
         else:
             print("No access_token in response!")
             return None
-            
     except Exception as e:
         print(f"Error getting access token: {e}")
         return None
+
+def get_headers():
+    global ACCESS_TOKEN_DRIVE, ACCESS_TOKEN_EXPIRY
+    if (ACCESS_TOKEN_DRIVE is None) or (ACCESS_TOKEN_EXPIRY <= datetime.utcnow()):
+        One_Drive_Auth()  # refresh token + expiry
+    return {
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+        "Content-Type": "application/json"
+    }
 # ----------- GET DF -----------
 def get_sales_order_df(order_id: str) -> pd.DataFrame:
     url = f"https://www.zohoapis.com/inventory/v1/salesorders/{order_id}"
@@ -592,8 +602,6 @@ def safe_request(method, url, **kwargs):
     timeout = kwargs.pop("timeout", 30)
     func = getattr(HTTP, method.lower())
     return func(url, timeout=timeout, **kwargs)
-def get_headers():
-    return {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}", "Content-Type": "application/json"}
 def process_message(mailbox, message_id, message_date):
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
@@ -788,7 +796,6 @@ def renew_subscription(sub_id, new_expiration_minutes=4230):
     else:
         print(f"❌ Failed to renew subscription {sub_id}: {resp.status_code} - {resp.text}")
         return False
-
 def renew_all_subscriptions(minutes=4230):
     headers = get_headers()
     resp = safe_request("get", f"{GRAPH_URL}/subscriptions", headers=headers)
