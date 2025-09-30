@@ -38,7 +38,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.8887900000109983e+18,"Acetone, 2.5 l, glass",9372.2,Carl Roth,
 2.8887900000109983e+18,"Acetonitrile, 2.5 l - ROTISOLV® ≥99,95 %, LC-MS Grade",AE70.2,Carl Roth,
 2.888790000006937e+18,Acid Reagent Powder Pillows (pk/100),104299,HACH,
-2.888790000003341e+18,Acid Reagent Powder Pillows for HR Silica,2107469,HACH,
+2.888790000003341e+18,Acid Reagent Powder Pillows for HR Silica,2107469,HACH,38220090
 2.888790000010377e+18,ACTICLEVER 115,10115310,Rikutec,
 2.888790000003168e+18,ACTIVATED CARBON FILTER,AC100-14,AO Smith,
 2.888790000002928e+18,ACTIVATED CARBON FILTER,AC100-21,AO Smith,
@@ -80,7 +80,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.8887900000088e+18,AluVer 3 Aluminum Reagent Powder Pillows,1429099,HACH,38221900
 2.888790000010999e+18,Amidosulphonic acid AnalaR NORMAPUR analytical reagent,20672.234,VWR Avantor®,2811198050
 2.888790000003918e+18,"Amino Acid F Reagent Powder Pillows, pk/100",2254069,HACH,
-2.8887900000033413e+18,"Amino Acid F reagent solution, 100 mL",2386442,HACH,
+2.8887900000033413e+18,"Amino Acid F reagent solution, 100 mL",2386442,HACH,29224949
 2.888790000004807e+18,Amino Acid Reagent (100mL MDB),193432,HACH,
 2.888790000005546e+18,Amino Acid Reagent Powder Pillows (pk/100),80499,HACH,
 2.8887900000047053e+18,"Ammonia cell test 0,5 - 16,0 mg/l NH₄-N",713-4002,VWR Avantor®,
@@ -340,7 +340,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.88879000002419e+18,"Chromium Reagent Powder Pillows, 0.010-0.700mg/L Cr (VI)",1271099,HACH,38221900
 2.888790000005546e+18,"Citric acid F reagent solution, 100 mL MDB",2254232,HACH,29181400.0
 2.888790000006937e+18,Citric Acid Powder Pillows,1454899,HACH,
-2.888790000003341e+18,Citric Acid Reagent Powder Pillows,2106269,HACH,
+2.888790000003341e+18,Citric Acid Reagent Powder Pillows,2106269,HACH,3822.00
 2.8887900000182543e+18,CIU 900 interface unit cpl. packed,N/a,Grundfos,
 2.888790000019397e+18,"CL114 cable, 1m, for screw cap electrode FX/S7/coax, BNC plug",A94L114,HACH,85444290
 2.888790000022877e+18,Clamping piece for rod 20 mm dia.,1015001732,OTT HydroMet,
@@ -483,7 +483,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000003992e+18,"Disposable paper tissues, white, 200 pieces",EZZ073,HACH,48182099
 2.888790000004109e+18,"Disposable Wipes, 11 x 22 cm, 280 per package",2097000,HACH,
 2.88879000000248e+18,"Dissolved Oxygen Reagent Accuvac Ampules, 0.3-15.0 mg/L O₂",2515025,HACH,3822
-2.8887900000033413e+18,"Dissolved Oxygen Reagent Accuvac Ampules, 6-800 µg/L O₂",2501025,HACH,
+2.8887900000033413e+18,"Dissolved Oxygen Reagent Accuvac Ampules, 6-800 µg/L O₂",2501025,HACH,90278090
 2.8887900000069504e+18,"Distilling link, 160 mm, 14/23",KX72.1,Carl Roth,
 2.888790000003388e+18,DK46/R+N Special,DK46/R+N Special,KROHNE,
 2.888790000003757e+18,Doppler Card,850-328,In-Situ,
@@ -1009,7 +1009,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.88879000002626e+18,Moisture analysers MA35MFrom  Sartorius,NT00.1,Carl Roth,90258040.0
 2.888790000004807e+18,"Molybdate 3 reagent solution, 100 mL",199532,HACH,38221900.0
 2.888790000003918e+18,"Molybdate 3 reagent solution, SCDB (50 mL)",199526,HACH,
-2.888790000003341e+18,Molybdate Reagent Powder Pillows,2107369,HACH,
+2.888790000003341e+18,Molybdate Reagent Powder Pillows,2107369,HACH,38220090
 2.888790000006937e+18,Molybdate Reagent Powder Pillows- 104199,104199,HACH,
 2.888790000005546e+18,Molybdate Reagent Solution (100mL MDB),223632,HACH,
 2.888790000005546e+18,"Molybdenum 1 Reagent Powder Pillows, 20 mL, pk/100",2352449,HACH,
@@ -1386,7 +1386,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000002862e+18,"Polyethylene Funnel, 82 mm",2415582,HACH,
 2.8887900000033413e+18,"Polyvinyl alcohol dispersing agent, SCDB, 50 mL",2376526,HACH,3822
 2.888790000003464e+18,Porphyrin 1 Reagent Powder Pillows,2603549,HACH,38221900.0
-2.888790000011037e+18,Porphyrin 2 Reagent Powder Pillows,2603649,HACH,
+2.888790000011037e+18,Porphyrin 2 Reagent Powder Pillows,2603649,HACH,3822.00.90
 2.88879000000482e+18,Portable HQ Series Field Case for Rugged Probes with Extended Cable Lengths,LEZ015.99.A002A,HACH,4202.0
 2.888790000002862e+18,"Potassium 2 Reagent Solution Pillows, pk/25",1432298,HACH,
 2.888790000002862e+18,"Potassium 3 Reagent Powder Pillows, pk/100",1432399,HACH,

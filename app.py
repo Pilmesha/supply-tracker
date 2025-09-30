@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, request, jsonify, make_response, current_app
+from flask import Flask, request, jsonify, make_response
 import pandas as pd
 from dotenv import load_dotenv
 import hmac
