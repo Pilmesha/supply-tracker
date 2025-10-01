@@ -915,7 +915,7 @@ def renew_subscriptions_endpoint():
     """Manually renew all subscriptions that are about to expire"""
     try:
         # Run renewal synchronously or in background depending on your needs.
-        POOL.submit(lambda: (with_app_ctx_call(renew_all_subscriptions)))
+        POOL.submit(lambda: with_app_ctx_call(renew_all_subscriptions)())
         return jsonify({"status": "success", "message": "Renewal scheduled"}), 200
     except Exception as e:
         print(f"❌ Renewal failed: {e}")
