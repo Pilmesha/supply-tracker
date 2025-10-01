@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64, re, pdfplumber
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from dateutil.parser import isoparse
 load_dotenv()
 
 # single session (reuse connections)
@@ -784,15 +785,15 @@ def initialize_subscriptions():
     return successful_subs
 def renew_subscription(sub_id, new_expiration_minutes=4230):
     headers = get_headers()
-    # Graph only accepts max ~4230 min for mail subs
-    new_expiration = (datetime.utcnow() + timedelta(minutes=new_expiration_minutes)).isoformat() + "Z"
+    new_expiration = (datetime.now(timezone.utc) + timedelta(minutes=new_expiration_minutes))
+    new_expiration = new_expiration.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     patch_url = f"{GRAPH_URL}/subscriptions/{sub_id}"
     payload = {"expirationDateTime": new_expiration}
 
     resp = safe_request("patch", patch_url, headers=headers, json=payload, timeout=30)
 
-    if resp.status_code == 200:
+    if resp.status_code in (200, 201):
         resp_json = resp.json()
         actual_exp = resp_json.get("expirationDateTime", "unknown")
         print(f"🔄 Renewed subscription {sub_id}")
@@ -802,6 +803,8 @@ def renew_subscription(sub_id, new_expiration_minutes=4230):
     else:
         print(f"❌ Failed to renew subscription {sub_id}: {resp.status_code} - {resp.text}")
         return False
+
+
 def renew_all_subscriptions(minutes=4230):
     headers = get_headers()
     resp = safe_request("get", f"{GRAPH_URL}/subscriptions", headers=headers)
@@ -811,20 +814,40 @@ def renew_all_subscriptions(minutes=4230):
     subs = resp.json().get("value", [])
     print(f"Found {len(subs)} subscriptions to renew")
 
+    failed = False
     for sub in subs:
         sub_id = sub["id"]
         exp_str = sub.get("expirationDateTime")
         if exp_str:
-            exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
-            remaining = exp_dt - datetime.utcnow()
+            try:
+                exp_dt = isoparse(exp_str)
+            except Exception:
+                print(f"⚠️ Could not parse expiration time for {sub_id}, forcing renew.")
+                exp_dt = datetime.now(timezone.utc)
 
-            # renew when less than 50% lifetime left (safer than <24h)
+            remaining = exp_dt - datetime.now(timezone.utc)
+
+            # renew when less than 48h left
             if remaining < timedelta(hours=48):
-                renew_subscription(sub_id, minutes)
+                ok = renew_subscription(sub_id, minutes)
+                if not ok:
+                    failed = True
             else:
                 print(f"⏳ Subscription {sub_id} still valid until {exp_dt}")
         else:
-            renew_subscription(sub_id, minutes)
+            ok = renew_subscription(sub_id, minutes)
+            if not ok:
+                failed = True
+
+    # if anything failed, rebuild from scratch
+    if failed:
+        print("🔁 Renewal failed → Deleting and re-initializing subscriptions")
+        delete_all_subscriptions()
+        init_subscriptions()
+def with_app_ctx_call(fn, *args, **kwargs):
+    """Helper: call fn within app context (for background tasks)"""
+    with app.app_context():
+        return fn(*args, **kwargs)
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     # Validation: Graph sends GET with validationToken param
@@ -910,6 +933,7 @@ def init_subscriptions_endpoint():
         print(f"❌ Initialization failed: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 @app.route("/renew", methods=["GET", "POST"])
 def renew_subscriptions_endpoint():
     """Manually renew all subscriptions that are about to expire"""
@@ -920,12 +944,6 @@ def renew_subscriptions_endpoint():
     except Exception as e:
         print(f"❌ Renewal failed: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-
-def with_app_ctx_call(fn, *args, **kwargs):
-    """Helper: call fn within app context (for background tasks)"""
-    with app.app_context():
-        return fn(*args, **kwargs)
-
 @app.route("/subscriptions", methods=["GET"])
 def list_subscriptions():
     try:
