@@ -810,11 +810,15 @@ def renew_all_subscriptions(minutes=4230):
         exp_str = sub.get("expirationDateTime")
         if exp_str:
             exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
-            if exp_dt - datetime.utcnow() < timedelta(hours=24):
+            remaining = exp_dt - datetime.utcnow()
+
+            # Renew when less than 48h left (safer than 24h)
+            if remaining < timedelta(hours=48):
                 renew_subscription(sub_id, minutes)
             else:
                 print(f"⏳ Subscription {sub_id} still valid until {exp_dt}")
         else:
+            print(f"⚠️ No expiration found for {sub_id}, renewing anyway")
             renew_subscription(sub_id, minutes)
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -951,9 +955,9 @@ def health():
 scheduler = BackgroundScheduler()
 scheduler.add_job(monday_job, "cron", day_of_week="mon", hour=7)  # Monday 08:00 UTC
 scheduler.add_job(
-    renew_all_subscriptions, 
-    "interval", 
-    hours=12,   # you can make this smaller (e.g. 6h) if you want safer margin
+    lambda: with_app_ctx_call(renew_all_subscriptions),
+    "interval",
+    hours=6,
     id="renew_subscriptions"
 )
 scheduler.start()
