@@ -784,14 +784,20 @@ def initialize_subscriptions():
     return successful_subs
 def renew_subscription(sub_id, new_expiration_minutes=4230):
     headers = get_headers()
+    # Graph only accepts max ~4230 min for mail subs
     new_expiration = (datetime.utcnow() + timedelta(minutes=new_expiration_minutes)).isoformat() + "Z"
 
     patch_url = f"{GRAPH_URL}/subscriptions/{sub_id}"
     payload = {"expirationDateTime": new_expiration}
 
     resp = safe_request("patch", patch_url, headers=headers, json=payload, timeout=30)
+
     if resp.status_code == 200:
-        print(f"🔄 Renewed subscription {sub_id} until {new_expiration}")
+        resp_json = resp.json()
+        actual_exp = resp_json.get("expirationDateTime", "unknown")
+        print(f"🔄 Renewed subscription {sub_id}")
+        print(f"   Requested until: {new_expiration}")
+        print(f"   Actual set by Graph: {actual_exp}")
         return True
     else:
         print(f"❌ Failed to renew subscription {sub_id}: {resp.status_code} - {resp.text}")
@@ -812,13 +818,12 @@ def renew_all_subscriptions(minutes=4230):
             exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
             remaining = exp_dt - datetime.utcnow()
 
-            # Renew when less than 48h left (safer than 24h)
+            # renew when less than 50% lifetime left (safer than <24h)
             if remaining < timedelta(hours=48):
                 renew_subscription(sub_id, minutes)
             else:
                 print(f"⏳ Subscription {sub_id} still valid until {exp_dt}")
         else:
-            print(f"⚠️ No expiration found for {sub_id}, renewing anyway")
             renew_subscription(sub_id, minutes)
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
