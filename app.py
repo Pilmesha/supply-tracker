@@ -18,6 +18,7 @@ import base64, re, pdfplumber
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pytz import timezone
+from pathlib import Path
 load_dotenv()
 
 # single session (reuse connections)
@@ -50,9 +51,6 @@ ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN_EXPIRY = datetime.utcnow()
 ACCESS_TOKEN = None
 DOC_TYPES = ["salesorders","purchaseorders"]
-
-MARKER_DIR = "/var/lib/myapp"   # persistent location
-MARKER_FILE = os.path.join(MARKER_DIR, "last_run.txt")
 
 MAILBOXES = [
     "info@vortex.ge",
@@ -434,22 +432,6 @@ def update_excel(new_df: pd.DataFrame) -> None:
             gc.collect()
 
 # ----------- MONDAY CHECKING -----------
-def already_ran_today() -> bool:
-    """Check if the daily job already ran today."""
-    if not os.path.exists(MARKER_FILE):
-        return False
-    with open(MARKER_FILE, "r") as f:
-        last_run_str = f.read().strip()
-    try:
-        last_run = datetime.strptime(last_run_str, "%Y-%m-%d").date()
-        return last_run == datetime.utcnow().date()
-    except ValueError:
-        return False
-def update_marker():
-    """Update marker file to today’s date."""
-    os.makedirs(MARKER_DIR, exist_ok=True)
-    with open(MARKER_FILE, "w") as f:
-        f.write(datetime.utcnow().date().isoformat())
 def fetch_recent_orders() -> list[dict]:
     base_url = "https://www.zohoapis.com/inventory/v1"
     result = []
@@ -484,7 +466,7 @@ def monday_job():
     If today is Monday, fetch & process Saturday orders.
     """
     now = datetime.now()
-    if now.weekday() == 0 and not already_ran_today(): # Monday only
+    if now.weekday() == 0: # Monday only
         print("🔄 Checking for Saturday-created orders...")
         orders = fetch_recent_orders()
         if orders:
@@ -551,7 +533,6 @@ def monday_job():
                     PO_future = POOL.submit(update_excel, PO_df_copy)
         else:
             print("ℹ️ No new Saturday orders found, skipping cleanup.")
-        update_marker()
 
 @app.route("/")
 def index():
@@ -637,7 +618,8 @@ def process_message(mailbox, message_id, message_date):
         else:
             print("❌ Gave up downloading file after attempts")
             return
-        items_df = pd.read_csv("zoho_items.csv")
+        csv_path = Path(__file__).parent / "zoho_items.csv"
+        items_df = pd.read_csv(csv_path)
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
         attachments = requests.get(att_url, headers=get_headers()).json().get('value', [])
         
