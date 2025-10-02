@@ -891,7 +891,7 @@ def cleanup_subscriptions():
     try:
         print("🧹 Cleaning up subscriptions...")
         # Run cleanup in background to avoid blocking
-        POOL.submit(lambda: (with_app_ctx_call(clear_all_subscriptions)))
+        POOL.submit(with_app_ctx_call, clear_all_subscriptions)
         return jsonify({"status": "success", "message": "Subscription cleanup scheduled"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -907,6 +907,8 @@ scheduler.add_job(
     lambda: POOL.submit(_initialize_subscriptions_worker, app),
     "interval",
     hours=6,
-    id="renew_subscriptions"
+    id="renew_subscriptions",
+    replace_existing=True,   # prevents duplicate jobs
+    max_instances=1          # ensures only one job runs at a time
 )
 scheduler.start()
