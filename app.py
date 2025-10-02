@@ -621,7 +621,27 @@ def process_message(mailbox, message_id, message_date):
         csv_path = Path(__file__).parent / "zoho_items.csv"
         items_df = pd.read_csv(csv_path)
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
-        attachments = requests.get(att_url, headers=get_headers()).json().get('value', [])
+        att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
+        if att_resp.status_code != 200:
+            print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
+            return
+
+        attachments = att_resp.json().get("value", [])
+
+        # ✅ Check for exactly one PDF
+        pdf_attachments = [
+            att for att in attachments
+            if att.get("name", "").lower().endswith(".pdf") or att.get("contentType") == "application/pdf"
+        ]
+
+        if len(pdf_attachments) != 1:
+            print(f"❌ Expected 1 PDF attachment, found {len(pdf_attachments)} - skipping message")
+            return
+
+        att = pdf_attachments[0]
+        if "contentBytes" not in att:
+            print("❌ Attachment has no contentBytes - skipping")
+            return
         
         # 2. Loop over attachments, decode and extract text directly
         all_text = ""
@@ -785,7 +805,7 @@ def webhook():
             print(f"Webhook triggered with {len(notifications)} notifications")
 
             # Pattern to match in email subjects (case-insensitive)
-            pattern = re.compile(r'(?i)Order\s*Confirmation.*PO-\d+')
+            pattern = re.compile(r'(?i)\bPO-\d+\b')
 
             for notification in notifications:
                 resource = notification.get('resource', '')
