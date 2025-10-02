@@ -55,8 +55,8 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000004651e+18,"Adapter Set, DR 2700, DR 2800, DR 3800 Spectrophotometers",LZV647,HACH,
 2.888790000003498e+18,"Adapter, USB/DC Power Jack",5813400,HACH,
 2.888790000016905e+18,"Addista Mixed-Parameter Standard, NIST, Wastewater, Low Range",LCA721,HACH,38221900
-2.8887900000025754e+18,Addista Multi parameter standard solution LCA700,LCA700,HACH,
-2.8887900000025754e+18,Addista Multi parameter standard solution LCA703,LCA703,HACH,
+2.8887900000025754e+18,Addista Multi parameter standard solution LCA700,LCA700,HACH,38221900
+2.8887900000025754e+18,Addista Multi parameter standard solution LCA703,LCA703,HACH,38221900
 2.8887900000025754e+18,Addista Multi parameter standard solution LCA704,LCA704,HACH,38221900
 2.8887900000025754e+18,Addista Multi parameter standard solution LCA705,LCA705,HACH,38221900
 2.8887900000025754e+18,Addista Multi parameter standard solution LCA708,LCA708,HACH,38221900
@@ -225,7 +225,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000023245e+18,"Bromcresol green-methyl red indicator solution, 100mL MDB",2329232,HACH,38221900
 2.8887900000109983e+18,"Bromocresol green, 10 g",T115.3,Carl Roth,
 2.888790000002545e+18,"Bromocresol green, 5 g",T115.2,Carl Roth,
-2.888790000009357e+18,"BS870 Redox Buffer, 215 mV, 500 ml",C10G100,HACH,
+2.888790000009357e+18,"BS870 Redox Buffer, 215 mV, 500 ml",C10G100,HACH,38221900
 2.888790000010544e+18,"Bucket, with graduated lines, 10 L",2087300,HACH,
 2.8887900000033413e+18,"Buffer Powder Pillows, pH 4.01 Colour-coded Red, pk/50",2226966,HACH,
 2.888790000002862e+18,"Buffer Powder Pillows, pH 7.00 Colour-coded Yellow, pk/50",2227066,HACH,
@@ -234,11 +234,11 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000010999e+18,"Buffer solution pH 4.00 ±0.01 (20 °C), 500 ml, plastic",P712.3,Carl Roth,
 2.888790000010999e+18,"Buffer solution pH 7.00 ±0.01 (20 °C), 500 ml, plastic",A518.3,Carl Roth,
 2.888790000011075e+18,"Buffer solution pillows, respirometric BOD nutrient, pk/50",2962266,HACH,
-2.888790000004705e+18,"Buffer Solution, pH 10.01, 125 mL",LZW9470.99,HACH,
-2.888790000004705e+18,"Buffer Solution, pH 4.01, 125 mL",LZW9460.99,HACH,
+2.888790000004705e+18,"Buffer Solution, pH 10.01, 125 mL",LZW9470.99,HACH,38221900
+2.888790000004705e+18,"Buffer Solution, pH 4.01, 125 mL",LZW9460.99,HACH,38221900
 2.888790000008036e+18,"Buffer Solution, pH 4.01, 250 mL",LZW9463.99,HACH,
 2.888790000005183e+18,"Buffer Solution, pH 4.01, 500 mL",1222349,HACH,
-2.8887900000047053e+18,"Buffer Solution, pH 7.00, 125 mL",LZW9461.98,HACH,
+2.8887900000047053e+18,"Buffer Solution, pH 7.00, 125 mL",LZW9461.98,HACH,38221900
 2.888790000008036e+18,"Buffer Solution, pH 7.00, 250 mL",LZW9464.98,HACH,
 2.888790000005183e+18,"Buffer Solution, pH 7.00, 500 mL",1222249,HACH,
 2.88879000000231e+18,"Burette with Schellbach stripes Class AS With a straight valve stopcock and a PTFE spindle, 10 ml",ET69.1,Carl Roth,70172000
@@ -278,7 +278,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000010627e+18,Carrier Profile & Anti floating Fixtures,Lamella-Accessories,Made in Turkey,ადგილობრივი წარმოება
 2.888790000017721e+18,Cartr. board non-EX/IS..OFx200,XFDA020500,KROHNE,90269000
 2.888790000022453e+18,"Casseroles, 1300 ml, 4",HC83.1,Carl Roth,69091100.0
-2.888790000018316e+18,"Cationic surfactants cuvette test 0.2-2.0 mg/L, 25 tests",LCK331,HACH,
+2.888790000018316e+18,"Cationic surfactants cuvette test 0.2-2.0 mg/L, 25 tests",LCK331,HACH,38221900
 2.888790000007285e+18,Caucasus Build Georgia / 28.04 - 30.04.2023,Caucasus Build,,
 2.888790000019684e+18,"CAx440EX Field Transmitter H₂S EX, Wireless 3G (EU & UK)",LXV449.98.01000,HACH,
 2.888790000019684e+18,CDx440sc Digital SC Gateway,LXV449.99.02000,HACH,
@@ -356,6 +356,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.8887900000047683e+18,"COD cuvette test - ISO 15705, 0-1000 mg/L O₂",LCI400,HACH,38221900
 2.88879000000248e+18,"COD cuvette test - ISO 15705, 0-150 mg/L O₂",LCI500,HACH,38221900
 2.888790000009135e+18,"COD cuvette test 1,000-10,000 mg/L O₂, 25 tests",LCK014,,38221900.0
+2.888790000009135e+18,"COD cuvette test 1,000-10,000 mg/L O₂, 25 tests",LCK014,,38221900.0
 2.888790000004268e+18,"COD cuvette test 100-2000 mg/L O₂, 25 tests",LCK514,HACH,38221900
 2.8887900000025754e+18,"COD cuvette test 100-600 mg/L O₂, 25 tests",LCK714,HACH,38221900.0
 2.888790000009135e+18,"COD cuvette test 15-150 mg/L O₂, 25 tests",LCK314,HACH,38221900
@@ -421,6 +422,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000022877e+18,"Current meter rod ø20 mm 2m, in 2 pieces, dm-grad.",1600012692,OTT HydroMet,
 2.88879000001361e+18,Customised protection housing Configuration,6600000040,OTT HydroMet,
 2.888790000016628e+18,"CuVer 1 Copper Reagent Powder Pillows, 0.04-5.00mg/L Cu, pk/100",2105869,HACH,38221900
+2.88879000000248e+18,"Cyanide cuvette test 0.01-0.6 mg/L CN, 25 tests",LCK315,HACH,38221900.0
 2.88879000000248e+18,"Cyanide cuvette test 0.01-0.6 mg/L CN, 25 tests",LCK315,HACH,38221900.0
 2.888790000002473e+18,"Cyanide IC Standard Solution, 100 ml",2658.1,Carl Roth,
 2.8887900000024724e+18,Cyanide Reagent Test 585 nm,2418875,Lovibond (AQUALYTIC),
@@ -549,10 +551,10 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000017797e+18,Electric card - for Star Valve Alfa 50,Alfa 50,Star Valve,842121000000'
 2.888790000010627e+18,Electrical Cabinet,Electrical Cabinet,VORTEX Water Engineering,
 2.888790000002312e+18,"Electrode Cleaning Solution for Minerals/Inorganic Samples, 500 mL",2975149,HACH,
-2.888790000009302e+18,"Electrode Cleaning Solution for Porous Pin/Diaphragm Junction, 250 mL",C20C380,HACH,
-2.888790000002312e+18,"Electrode Cleaning Solution for Proteins/Organics Samples, 250 mL",C20C370,HACH,
+2.888790000009302e+18,"Electrode Cleaning Solution for Porous Pin/Diaphragm Junction, 250 mL",C20C380,HACH,38221900
+2.888790000002312e+18,"Electrode Cleaning Solution for Proteins/Organics Samples, 250 mL",C20C370,HACH,28273985
 2.888790000002422e+18,"Electrode Cleaning Solution for Regular Maintenance, 500 mL",2965249,HACH,38221900.0
-2.888790000002312e+18,"Electrode Cleaning solution, RENOVO.X extra strong, 250 mL",S16M002,HACH,
+2.888790000002312e+18,"Electrode Cleaning solution, RENOVO.X extra strong, 250 mL",S16M002,HACH,28289000
 2.888790000006538e+18,"Electronic Pipet ''TenSette plus'', 0.2 up to 5.0 ml, with rack, battery and power supply",BBP087,HACH,8479
 2.888790000025747e+18,Electronic unit complete IFC300,CG30011100,KROHNE,
 2.888790000009451e+18,Elga Labwater - PC110COBPM1 - CHORUS 1 COMPLETE PURELAB W/PUMP 10 L/HR (Each),12291403,ELGA LabWater,
@@ -580,10 +582,10 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000002473e+18,FH950 Portable Velocity System with 6.5' Cable,FH950.10005,HACH,
 2.888790000002312e+18,"Filling Solution, Reference, 2.44 M KCl, 59 mL",2965026,HACH,38221900.0
 2.888790000002312e+18,"Filling Solution, Reference, 3 M KCl with AgCl, 28 mL",2841700,HACH,38221900
-2.8887900000047053e+18,"Filling Solution, Reference, 3 M KCl, 125 mL",LZW9510.99,HACH,
+2.8887900000047053e+18,"Filling Solution, Reference, 3 M KCl, 125 mL",LZW9510.99,HACH,28273985
 2.888790000017307e+18,"Filling Solution, Reference, 3 M KCl, 250 mL",LZW9500.99,HACH,
 2.888790000002312e+18,"Filling Solution, Reference, 3 M KCl, 50 mL",2756559,HACH,
-2.8887900000023127e+18,"Filling Solution, Reference, KCl Crystals (KCl.C), 15 g",S21M001,HACH,
+2.8887900000023127e+18,"Filling Solution, Reference, KCl Crystals (KCl.C), 15 g",S21M001,HACH,28289000
 2.888790000002312e+18,"Filling Solution, Reference, Saturated KCl, 500 mL",25118049,HACH,
 2.888790000002312e+18,"Filling Solution, Reference, Saturated KCl, 59 mL",25118026,HACH,
 2.888790000004268e+18,"Filter holder, for vacuum filtration, glass",234000,HACH,
@@ -629,7 +631,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000025498e+18,Foam detection cable 70987 for 6110 V3,DG33486,HACH,85444290
 2.888790000010961e+18,Folin-Ciocalteu’s reagent,1EPY.1,Carl Roth,
 2.888790000027434e+18,"Formaldehyde solution, 1 l, 37 %, p.a., ACS",4979.1,Carl Roth,
-2.88879000000248e+18,Formaldehyde trace cuvette test 0.01-1.0 mg/L H₂CO,LCS325,HACH,
+2.88879000000248e+18,Formaldehyde trace cuvette test 0.01-1.0 mg/L H₂CO,LCS325,HACH,38221900
 2.888790000010544e+18,"Formazin Turbidity Standard, 4000 NTU, 100 mL",246142,HACH,3822
 2.888790000002472e+18,"Formic acid, 1 l, glass",4724.1,Carl Roth,
 2.888790000014745e+18,"Formic acid, 1 l, glass ≥85 %, pure",5355.1,Carl Roth,
@@ -943,7 +945,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000006988e+18,"Maintenance kit for 5500 sc Silica Analyser, 6 channels",6788303,HACH,39173300.0
 2.8887900000023107e+18,Maintenance Kit PVDF for dosing pumps PS,2203536,Culligan,
 2.888790000002314e+18,MAKUTE ბრტყელტუჩა,1152,Tools,
-2.888790000007701e+18,Manganese reagent set 0.2-5 mg/L / 0.02-1.0 mg/L Mn,LCW032,HACH,
+2.888790000007701e+18,Manganese reagent set 0.2-5 mg/L / 0.02-1.0 mg/L Mn,LCW032,HACH,38221900
 2.888790000016789e+18,"Manganese Reagent Set, PAN, 0.006-0.700mg/L Mn",2651700,HACH,38220090
 2.8887900000033413e+18,"Manganese Reagent Set, Powder Pillows, 0.1-20.0mg/L Mn",2430000,HACH,38220090
 2.888790000022453e+18,"Manganese(II) sulphate monohydrate, 250 g≥99 %, p.a., ACS",4487.1,Carl Roth,28332980.0
@@ -1280,6 +1282,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000011076e+18,"Organic Acids cuvette test 50-2500 mg/L, 25 tests",LCK365,HACH,
 2.888790000002311e+18,"Oring I 36,6 Feed/ Concentr Adapt.",2203635,Culligan,
 2.888790000002312e+18,"ORP buffer solution, 200 mV, 500 mL",25M2A1001-115,HACH,38221900
+2.888790000002312e+18,"ORP buffer solution, 200 mV, 500 mL",25M2A1001-115,HACH,38221900
 2.8887900000109983e+18,"ortho-Phosphoric acid, 2.5 l, plastic",9079.2,Carl Roth,
 2.88879000001361e+18,OTT RLS radar sensor for water level measurement - 25.3 GHz,6310900192-D-M-E,OTT HydroMet,90261029
 2.88879000001361e+18,OTT SLD Side-Looking Doppler Flow Sensor,2230003090,OTT HydroMet,
@@ -1396,7 +1399,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.8887900000201165e+18,"Potassium chloride, 1 kg ≥99 %, pure, with anti-caking agent",1LCY.1,Carl Roth,31042090
 2.888790000002545e+18,"Potassium chloride, 500 g",P017.2,Carl Roth,
 2.888790000010961e+18,"Potassium chromate, 1 kg",HN33.4,Carl Roth,
-2.888790000019857e+18,"Potassium cuvette test 8-50 mg/L K, 24 tests",LCK328,HACH,
+2.888790000019857e+18,"Potassium cuvette test 8-50 mg/L K, 24 tests",LCK328,HACH,38221900
 2.8887900000055465e+18,Potassium dichromate solution,P720.1,Carl Roth,
 2.888790000010961e+18,"Potassium dichromate, 1 kg",7953.1,Carl Roth,
 2.888790000010961e+18,"Potassium hexacyanoferrate(III), 500 g",P746.1,Carl Roth,
@@ -1548,7 +1551,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.8887900000034964e+18,"Sample cell, 10 mm rectangular, glass, pk/3",LZP045,HACH,70171000
 2.888790000008986e+18,"Sample cell, 10 mm square Quartz glass, 1 pcs",2624410,HACH,70200080
 2.888790000005546e+18,"Sample cell, 25 mm round Glass, 6 pcs",2401906,HACH,70109091
-2.888790000002312e+18,"Sample cell, 50 mm rectangular Glass, 1 pcs",LZP167,HACH,
+2.888790000002312e+18,"Sample cell, 50 mm rectangular Glass, 1 pcs",LZP167,HACH,70200080
 2.888790000008094e+18,"Sample cell, 50 mm rectangular Glass, 1 pcs (2629250)",2629250,HACH,
 2.888790000002312e+18,"Sample Cell: 1"" Square Glass 10 mL matched pair",2495402,HACH,7020
 2.888790000002312e+18,"Sample Cell: 1"" Square Glass 10 mL matched set of 8",2495408,HACH,
@@ -1799,6 +1802,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.8887900000047683e+18,"Sulphate Reagent Powder Pillows, 2-70 mg/L SO₄",2106769,HACH,3822
 2.8887900000031693e+18,"Sulphate standard solution, 1000 mg/L SO₄ (NIST), 500 mL",2175749,HACH,28331100
 2.88879000000248e+18,"Sulphide cuvette test 0.1-2.0 mg/L S2-, 25 tests",LCK653,HACH,39221900.0
+2.88879000000248e+18,"Sulphide cuvette test 0.1-2.0 mg/L S2-, 25 tests",LCK653,HACH,39221900.0
 2.8887900000109983e+18,"Sulphuric acid ROTI®Volum 0,05 mol/l - 0,1 N, volumetric standard solution",CN64.1,Carl Roth,
 2.888790000005546e+18,"Sulphuric acid standard solution, 0.020 N, 1 L",20353,HACH,
 2.8887900000047053e+18,"Sulphuric acid, 1 l",X945.1,Carl Roth,
@@ -1870,7 +1874,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000012857e+18,"TOC (Purging Method) TNT, 100-700 mg/L C",2760445,HACH,38221900
 2.888790000002836e+18,"TOC (Purging Method) TNT, 15-150 mg/L C",2815945,HACH,38221900
 2.888790000014873e+18,"TOC cuvette test (purging method) 3-30 mg/L C, 25 tests",LCK385,HACH,38221900
-2.888790000012857e+18,"TOC cuvette test (purging method) 300-3000 mg/L C, 25 tests",LCK387,HACH,
+2.888790000012857e+18,"TOC cuvette test (purging method) 300-3000 mg/L C, 25 tests",LCK387,HACH,38221900
 2.888790000020064e+18,TOC-X5 TOC Shaker for purging method,LQV148.99.00001,,
 2.8887900000023137e+18,TOLSEN 20035 38 თავიანი სახრახნისების ნაკრები,1176,Tools,
 2.8887900000023137e+18,"TOLSEN 20036, 41 თავიანი ტრიშოტკის (ხრუტუნა) ნაკრები",1177,Tools,
@@ -1916,7 +1920,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000002407e+18,"Tube, culture, 16 x 100 mm, pk/6",2275806,HACH,7010.0
 2.88879000000248e+18,"Tubes, Micro Dist user fill option, pk/50",A17517,HACH,
 2.8887900000023127e+18,Tungsten Lamp,A23778,HACH,85392198
-2.888790000002312e+18,"Turbidity standard 4,000 FNU, 100 mL",LCW813,HACH,
+2.888790000002312e+18,"Turbidity standard 4,000 FNU, 100 mL",LCW813,HACH,38221900
 2.88879000000248e+18,"Turbidity Standard, Stablcal, 200 NTU, 100 mL",2660442,HACH,3822
 2.888790000003107e+18,"Turbidity Standard, Stablcal, 400,0 NTU, 500 mL",7121649,HACH,
 2.8887900000109783e+18,"Tween® 80, 1 kg",9139.2,Carl Roth,
