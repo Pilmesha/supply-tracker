@@ -906,7 +906,7 @@ scheduler.add_job(monday_job, "cron", day_of_week="mon", hour=7)  # Monday 08:00
 scheduler.add_job(
     lambda: POOL.submit(_initialize_subscriptions_worker, app),
     "interval",
-    minutes=6,
+    hours=6,
     id="renew_subscriptions",
     replace_existing=True,   # prevents duplicate jobs
     max_instances=1          # ensures only one job runs at a time
