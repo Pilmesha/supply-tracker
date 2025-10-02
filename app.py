@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64, re, pdfplumber
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from pytz import timezone
 load_dotenv()
 
 # single session (reuse connections)
@@ -33,7 +34,6 @@ HTTP.mount("https://", adapter)
 HTTP.mount("http://", adapter)
 # thread pool to avoid unbounded thread creation
 POOL = ThreadPoolExecutor(max_workers=4)  # tune 2-4 on free tier
-
 # single lock to avoid concurrent workbook uploads
 EXCEL_LOCK = threading.Lock()
 
@@ -902,13 +902,12 @@ def health():
 
 # ----------- SCHEDULERS -----------
 scheduler = BackgroundScheduler()
-scheduler.add_job(monday_job, "cron", day_of_week="mon", hour=7)  # Monday 08:00 UTC
 scheduler.add_job(
-    lambda: POOL.submit(_initialize_subscriptions_worker, app),
-    "interval",
-    hours=6,
-    id="renew_subscriptions",
-    replace_existing=True,   # prevents duplicate jobs
-    max_instances=1          # ensures only one job runs at a time
+    monday_job,
+    "cron",
+    day_of_week="mon",
+    hour=10,
+    minute=5,
+    timezone=timezone("Asia/Tbilisi")  # UTC+4
 )
 scheduler.start()
