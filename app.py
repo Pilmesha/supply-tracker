@@ -657,38 +657,38 @@ def process_message(mailbox, message_id, message_date):
         po_number = po_match.group(0) if po_match else None
         
         if po_number:
-    print("Found PO number")
+            print("Found PO number")
 
-    # Filter orders_df for this PO
-    matching_idx = orders_df.index[orders_df["PO"] == po_number]
+            # Filter orders_df for this PO
+            matching_idx = orders_df.index[orders_df["PO"] == po_number]
 
-    # Keep track of whether we updated anything
-    updated_rows = 0
+            # Keep track of whether we updated anything
+            updated_rows = 0
 
-    for idx in matching_idx:
-        code = str(orders_df.at[idx, "Code"])
-        
-        # Check if this item's code appears in the current confirmation message
-        if code and code in all_text:
-            print(f"→ Match found for code {code}")
+            for idx in matching_idx:
+                code = str(orders_df.at[idx, "Code"])
+                
+                # Check if this item's code appears in the current confirmation message
+                if code and code in all_text:
+                    print(f"→ Match found for code {code}")
 
-            # Fill HS Code if missing
-            hs_row = items_df[items_df["sku"] == code]
-            hs_code = hs_row["HS_Code"].iloc[0] if not hs_row.empty else None
+                    # Fill HS Code if missing
+                    hs_row = items_df[items_df["sku"] == code]
+                    hs_code = hs_row["HS_Code"].iloc[0] if not hs_row.empty else None
 
-            if pd.isna(orders_df.at[idx, "HS Code"]) or orders_df.at[idx, "HS Code"] == "":
-                orders_df.at[idx, "HS Code"] = hs_code
-                print("   Filled HS code")
+                    if pd.isna(orders_df.at[idx, "HS Code"]) or orders_df.at[idx, "HS Code"] == "":
+                        orders_df.at[idx, "HS Code"] = hs_code
+                        print("   Filled HS code")
 
-            # Fill confirmation date only for this specific item
-            if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
-                orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = message_date
-                print("   Filled confirmation date")
+                    # Fill confirmation date only for this specific item
+                    if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
+                        orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = message_date
+                        print("   Filled confirmation date")
 
-            updated_rows += 1
+                    updated_rows += 1
 
-    if updated_rows == 0:
-        print("⚠️ No matching item codes found in this confirmation message.")
+            if updated_rows == 0:
+                print("⚠️ No matching item codes found in this confirmation message.")
 
         # 🟢 after loop, update sheet once:
         if "მიმდინარე " in wb.sheetnames:
