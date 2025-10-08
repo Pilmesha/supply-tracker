@@ -1711,7 +1711,7 @@ item_id,item_name,sku,manufacturer,HS_Code
 2.888790000018628e+18,"Solitax highline sc Turbidity (0.001-4000 NTU) and Suspended Solids (0.001-500 g/L) built-in probe, with wiper, stainless steel",LXV424.99.00200,HACH,
 2.888790000004611e+18,Solitax inline sc,LXV424.99.00100,HACH,90275000
 2.8887900000034964e+18,Solitax Parts Service Repair,LZY261,HACH,
-2.8887900000034683e+18,Solitax t-line sc with wiper,LXV423.99.10000,HACH,
+2.8887900000034683e+18,Solitax t-line sc with wiper,LXV423.99.10000,HACH,90275000
 2.8887900000034964e+18,"Solitax Wiper Blades, replacement only, pk/5",LZX050,HACH,
 2.888790000003413e+18,"Solution indicator, bromphenol blue, 100 mL MDB",1455232,HACH,
 2.88879000001583e+18,Sonatax sc Sensor,LXV431.99.00001,HACH,
@@ -2095,3 +2095,4 @@ item_id,item_name,sku,manufacturer,HS_Code
 ,Piston pump CR-KP292 end vacuum abs. 292 mbar,CYA9.1,Carl Roth,84141089.0
 ,OPTIFLUX 4000 F,VN034AA16405130000500000000000,KROHNE,90261021
 ,"Blind plug-M20x1,5-ATEX-II2GD-EEx-d-IIC-1.4404",4000116801,KROHNE,73181900
+,"SC4500 Controller, Prognosys, 5x mA Output, 1 digital Sensor, 100 - 240 VAC, without power cord",LXV525.99A11501,HACH,85371091
