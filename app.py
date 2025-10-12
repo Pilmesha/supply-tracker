@@ -1,20 +1,11 @@
-import os
-import requests
+import os, requests, hmac, hashlib, io, random, time, threading, gc, base64, re, pdfplumber
 from flask import Flask, request, jsonify, make_response
 import pandas as pd
 from dotenv import load_dotenv
-import hmac
-import hashlib
-import io
-import random
-import time
 from openpyxl import load_workbook
-import threading
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
-import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import base64, re, pdfplumber
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pytz import timezone
@@ -47,6 +38,7 @@ CLIENT_ID_DRIVE = os.getenv('CLIENT_ID_DRIVE')
 CLIENT_SECRET_DRIVE = os.getenv('CLIENT_SECRET_DRIVE')
 DRIVE_ID = os.getenv('DRIVE_ID')
 FILE_ID = os.getenv('FILE_ID')
+PERMS_ID = os.getenv('PERMS_ID')
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN_EXPIRY = datetime.utcnow()
 ACCESS_TOKEN = None
@@ -591,13 +583,17 @@ def process_message(mailbox, message_id, message_date):
         file_stream = None
         wb = None
         orders_df = pd.DataFrame()
-        # --- Step 1: Download current file from OneDrive ---
+        perms_df = pd.DataFrame()
+
+        # --- Step 1: Download current orders Excel file ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+        perms_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{PERMS_ID}/content"
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
+                # --- Download orders file ---
                 resp = HTTP.get(url_download, headers=headers, timeout=60)
                 resp.raise_for_status()
                 file_stream = io.BytesIO(resp.content)
@@ -609,17 +605,39 @@ def process_message(mailbox, message_id, message_date):
                     orders_df.columns = orders_df.iloc[0]  # first row as header
                     orders_df = orders_df[1:]              # drop header row
                 else:
+                    print("⚠️ Worksheet 'მიმდინარე ' not found in orders file.")
                     orders_df = pd.DataFrame()
-                break
+
+                # --- Download permissions Excel file ---
+                try:
+                    resp_perms = HTTP.get(perms_download, headers=headers, timeout=60)
+                    resp_perms.raise_for_status()
+                    perms_stream = io.BytesIO(resp_perms.content)
+                    perms_df = pd.read_excel(perms_stream, header=1)
+                    perms_stream.close()
+                    perms_stream = None
+                    if not {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(perms_df.columns):
+                        print("⚠️ Warning: Permissions file missing required columns.")
+                    else:
+                        perms_df = perms_df[["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"]]
+                        print(f"✅ Permissions Excel downloaded successfully ({len(perms_df)} rows).")
+
+                except Exception as e_perm:
+                    print(f"⚠️ Could not download permissions Excel: {e_perm}")
+                    perms_df = pd.DataFrame(columns=["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"])
+
+                break  # success — exit retry loop
+
             except Exception as e:
                 wait = min(5 * (attempt + 1), 30)
-                print(f"⚠️ Error downloading file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                print(f"⚠️ Error downloading main file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
                 time.sleep(wait)
+
         else:
-            print("❌ Gave up downloading file after attempts")
+            print("❌ Gave up downloading files after multiple attempts")
             return
-        csv_path = Path(__file__).parent / "zoho_items.csv"
-        items_df = pd.read_csv(csv_path)
+
+        items_df = pd.read_csv("zoho_items.csv")
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
         att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
         if att_resp.status_code != 200:
@@ -642,8 +660,7 @@ def process_message(mailbox, message_id, message_date):
         if "contentBytes" not in att:
             print("❌ Attachment has no contentBytes - skipping")
             return
-        
-        # 2. Loop over attachments, decode and extract text directly
+        # --- 2. Loop over attachments, decode and extract text directly ---
         all_text = ""
         for att in attachments:
             if 'contentBytes' in att and att['name'].lower().endswith('.pdf'):
@@ -651,26 +668,25 @@ def process_message(mailbox, message_id, message_date):
                 with pdfplumber.open(io.BytesIO(content)) as pdf:
                     for page in pdf.pages:
                         all_text += (page.extract_text() or "") + "\n"
-        
-        # 3. Extract PO number (first occurrence)
+
+        # --- 3. Extract PO number (first occurrence) ---
         po_match = re.search(r"PO-\d+", all_text)
         po_number = po_match.group(0) if po_match else None
-        
-        if po_number:
-            print("Found PO number")
 
-            # Filter orders_df for this PO
+        if po_number:
+            print(f"🎯 Found PO number: {po_number}")
+
             matching_idx = orders_df.index[orders_df["PO"] == po_number]
 
-            # Keep track of whether we updated anything
             updated_rows = 0
 
             for idx in matching_idx:
-                code = str(orders_df.at[idx, "Code"])
-                
-                # Check if this item's code appears in the current confirmation message
+                code = str(orders_df.at[idx, "Code"]).strip()
+                print(f"\n🔍 Processing code: '{code}'")
+
+                # Check if this code appears in the PDF text
                 if code and code in all_text:
-                    print(f"→ Match found for code {code}")
+                    print(f"✅ Match found for code {code} in PDF")
 
                     # Fill HS Code if missing
                     hs_row = items_df[items_df["sku"] == code]
@@ -680,12 +696,23 @@ def process_message(mailbox, message_id, message_date):
                         orders_df.at[idx, "HS Code"] = hs_code
                         print("   Filled HS code")
 
-                    # Fill confirmation date only for this specific item
+                    # Fill confirmation date
                     if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
                         orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = message_date
                         print("   Filled confirmation date")
 
-                    updated_rows += 1
+                    # --- Filling წერილი ---
+                    print(f"   Searching permissions for code: '{code}'")
+                    perm_row = perms_df[perms_df["მწარმოებლის კოდი"].astype(str).str.strip() == code]
+                    
+                    if not perm_row.empty:
+                        num_perm = perm_row["მიღებული ნებართვა 1 / წერილის ნომერი"].iloc[0]
+                        print(f"   📋 Permission number found: {num_perm}")
+                        orders_df.at[idx, "წერილი"] = num_perm
+                        updated_rows += 1
+                        print(f"   ✅ SUCCESS: Filled წერილი with {num_perm}")
+                    else:
+                        orders_df.at[idx, "წერილი"] = "არ სჭირდება"
 
             if updated_rows == 0:
                 print("⚠️ No matching item codes found in this confirmation message.")
@@ -718,6 +745,8 @@ def process_message(mailbox, message_id, message_date):
             range_address = get_used_range("მიმდინარე ")
             table_name = create_table_if_not_exists(range_address)
             print(f"✅ Upload successful. Created table named {table_name}")
+            file_stream.close()
+            file_stream = wb = None
             del orders_df
             gc.collect()
             return
