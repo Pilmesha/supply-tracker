@@ -446,11 +446,13 @@ def fetch_recent_orders() -> list[dict]:
         for order in orders:
             order_id = order.get("purchaseorder_id") if doc_type == "purchaseorders" else order.get("salesorder_id")
             order_number = order.get("purchaseorder_number") if doc_type == "purchaseorders" else order.get("salesorder_number")
-            result.append({
-                "order_id": order_id,
-                "order_number": order_number,
-                "type": "purchaseorder" if doc_type == "purchaseorders" else "salesorder"
-            })
+            order_status = order.get("status").lower()
+            if order_status == 'open' or order_status == 'approved' or order_status == 'issued'
+                result.append({
+                    "order_id": order_id,
+                    "order_number": order_number,
+                    "type": "purchaseorder" if doc_type == "purchaseorders" else "salesorder"
+                })
     return result
 def monday_job():
     """
@@ -620,7 +622,6 @@ def process_message(mailbox, message_id, message_date):
                         print("⚠️ Warning: Permissions file missing required columns.")
                     else:
                         perms_df = perms_df[["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"]]
-                        print(f"✅ Permissions Excel downloaded successfully ({len(perms_df)} rows).")
 
                 except Exception as e_perm:
                     print(f"⚠️ Could not download permissions Excel: {e_perm}")
@@ -848,7 +849,7 @@ def webhook():
             print(f"Webhook triggered with {len(notifications)} notifications")
 
             # Pattern to match in email subjects (case-insensitive)
-            pattern = re.compile(r'(?i)\bPO-\d+\b')
+            pattern = re.compile(r'(?i)(?<!\b(?:received|shipped)\s)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been received\b)')
 
             for notification in notifications:
                 resource = notification.get('resource', '')
@@ -860,9 +861,8 @@ def webhook():
                     continue
                 message = message_response.json()
                 subject = message.get('subject', '')
-                print(f"Checking subject: {subject!r}")
                 if pattern.search(subject):
-                    print("✅ Pattern matched - scheduling processing")
+                    print(f"✅ Pattern matched in {subject!r} - scheduling processing")
                     # parse mailbox robustly
                     path_parts = resource.split('/')
                     mailbox = None
@@ -880,9 +880,6 @@ def webhook():
                     message_date = message.get('receivedDateTime')
                     # schedule heavy processing in thread pool
                     POOL.submit(process_message, mailbox, message_id, message_date)
-                else:
-                    print("❌ Pattern not found - skipping message")
-
             # return quickly so Graph knows we accepted the notifications
             return jsonify({"status": "accepted"}), 202
         except Exception as e:
