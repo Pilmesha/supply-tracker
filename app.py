@@ -447,7 +447,7 @@ def fetch_recent_orders() -> list[dict]:
             order_id = order.get("purchaseorder_id") if doc_type == "purchaseorders" else order.get("salesorder_id")
             order_number = order.get("purchaseorder_number") if doc_type == "purchaseorders" else order.get("salesorder_number")
             order_status = order.get("status").lower()
-            if order_status == 'open' or order_status == 'approved' or order_status == 'issued'
+            if order_status == 'open' or order_status == 'approved' or order_status == 'issued':
                 result.append({
                     "order_id": order_id,
                     "order_number": order_number,
