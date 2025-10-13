@@ -849,7 +849,7 @@ def webhook():
             print(f"Webhook triggered with {len(notifications)} notifications")
 
             # Pattern to match in email subjects (case-insensitive)
-            pattern = re.compile(r'(?i)(?<!\b(?:received|shipped)\s)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been received\b)')
+            pattern = re.compile(r'(?i)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been (?:partially\s*)?received\b)')
 
             for notification in notifications:
                 resource = notification.get('resource', '')
@@ -861,25 +861,26 @@ def webhook():
                     continue
                 message = message_response.json()
                 subject = message.get('subject', '')
-                if pattern.search(subject):
-                    print(f"✅ Pattern matched in {subject!r} - scheduling processing")
-                    # parse mailbox robustly
-                    path_parts = resource.split('/')
-                    mailbox = None
-                    try:
-                        # resource typically: users/{user-id}/messages/{message-id}
-                        if len(path_parts) >= 4 and path_parts[0].lower() in ("users", "me"):
-                            mailbox = path_parts[1]
-                        else:
+                if not re.search(r'(?i)\b(received|shipped)\b', subject):
+                    if pattern.search(subject):
+                        print(f"✅ Pattern matched in {subject!r} - scheduling processing")
+                        # parse mailbox robustly
+                        path_parts = resource.split('/')
+                        mailbox = None
+                        try:
+                            # resource typically: users/{user-id}/messages/{message-id}
+                            if len(path_parts) >= 4 and path_parts[0].lower() in ("users", "me"):
+                                mailbox = path_parts[1]
+                            else:
+                                mailbox = "unknown"
+                        except Exception:
                             mailbox = "unknown"
-                    except Exception:
-                        mailbox = "unknown"
-                        print(f"Warning: Unexpected resource format: {resource}")
+                            print(f"Warning: Unexpected resource format: {resource}")
 
-                    message_id = message.get('id')
-                    message_date = message.get('receivedDateTime')
-                    # schedule heavy processing in thread pool
-                    POOL.submit(process_message, mailbox, message_id, message_date)
+                        message_id = message.get('id')
+                        message_date = message.get('receivedDateTime')
+                        # schedule heavy processing in thread pool
+                        POOL.submit(process_message, mailbox, message_id, message_date)
             # return quickly so Graph knows we accepted the notifications
             return jsonify({"status": "accepted"}), 202
         except Exception as e:
