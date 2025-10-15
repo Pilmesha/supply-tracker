@@ -371,12 +371,16 @@ def update_excel(new_df: pd.DataFrame) -> None:
                                                 updated_count += 1
 
                 # --- Step 3: Replace only the 'მიმდინარე ' sheet ---
-                if "მიმდინარე " in wb.sheetnames:
-                    wb.remove(wb["მიმდინარე "])
-                ws_new = wb.create_sheet("მიმდინარე ")
+                ws = wb["მიმდინარე "]
 
-                for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
-                    ws_new.append(list(r))
+                # Write headers if needed
+                for col_idx, col_name in enumerate(existing_df.columns.tolist(), start=1):
+                    ws.cell(row=1, column=col_idx).value = col_name
+
+                # Write data values
+                for row_idx, row in enumerate(existing_df.values.tolist(), start=2):
+                    for col_idx, value in enumerate(row, start=1):
+                        ws.cell(row=row_idx, column=col_idx).value = value
 
                 # --- Step 4: Save workbook to memory ---
                 output = io.BytesIO()
@@ -486,12 +490,16 @@ def monday_job():
                     if "PO" in existing_df.columns:
                         existing_df = existing_df[existing_df["PO"] != order["order_number"]]
             # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
-            if "მიმდინარე " in wb.sheetnames:
-                wb.remove(wb["მიმდინარე "])
-            ws_new = wb.create_sheet("მიმდინარე ")
+            ws = wb["მიმდინარე "]
 
-            for r in [existing_df.columns.tolist()] + existing_df.values.tolist():
-                ws_new.append(list(r))
+            # Write headers if needed
+            for col_idx, col_name in enumerate(existing_df.columns.tolist(), start=1):
+                ws.cell(row=1, column=col_idx).value = col_name
+
+            # Write data values
+            for row_idx, row in enumerate(existing_df.values.tolist(), start=2):
+                for col_idx, value in enumerate(row, start=1):
+                    ws.cell(row=row_idx, column=col_idx).value = value
 
             # --- Step 5: Save workbook to memory ---
             output = io.BytesIO()
@@ -719,12 +727,16 @@ def process_message(mailbox, message_id, message_date):
                 print("⚠️ No matching item codes found in this confirmation message.")
 
         # 🟢 after loop, update sheet once:
-        if "მიმდინარე " in wb.sheetnames:
-            wb.remove(wb["მიმდინარე "])
-        ws_new = wb.create_sheet("მიმდინარე ")
+        ws = wb["მიმდინარე "]
 
-        for r in [orders_df.columns.tolist()] + orders_df.values.tolist():
-            ws_new.append(list(r))
+        # Write headers if needed
+        for col_idx, col_name in enumerate(existing_df.columns.tolist(), start=1):
+            ws.cell(row=1, column=col_idx).value = col_name
+
+        # Write data values
+        for row_idx, row in enumerate(existing_df.values.tolist(), start=2):
+            for col_idx, value in enumerate(row, start=1):
+                ws.cell(row=row_idx, column=col_idx).value = value
 
         # Save workbook to memory
         output = io.BytesIO()
