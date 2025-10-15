@@ -730,11 +730,11 @@ def process_message(mailbox, message_id, message_date):
         ws = wb["მიმდინარე "]
 
         # Write headers if needed
-        for col_idx, col_name in enumerate(existing_df.columns.tolist(), start=1):
+        for col_idx, col_name in enumerate(orders_df.columns.tolist(), start=1):
             ws.cell(row=1, column=col_idx).value = col_name
 
         # Write data values
-        for row_idx, row in enumerate(existing_df.values.tolist(), start=2):
+        for row_idx, row in enumerate(orders_df.values.tolist(), start=2):
             for col_idx, value in enumerate(row, start=1):
                 ws.cell(row=row_idx, column=col_idx).value = value
 
