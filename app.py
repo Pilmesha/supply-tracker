@@ -858,7 +858,7 @@ def webhook():
         try:
             data = request.json or {}
             notifications = data.get('value', [])
-            print(f"Webhook triggered with {len(notifications)} notifications")
+            #print(f"Webhook triggered with {len(notifications)} notifications")
 
             # Pattern to match in email subjects (case-insensitive)
             pattern = re.compile(r'(?i)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been (?:partially\s*)?received\b)')
