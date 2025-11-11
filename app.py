@@ -333,7 +333,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
                 for idx, row in new_df.iterrows():
                     ref = row.get("Reference")
                     if pd.notna(ref):
-                        refs = [r.strip() for r in str(ref).split(",") if r.strip()]
+                        refs = [r.strip() for r in re.split(r"[;,]", str(ref)) if r.strip()]
                         for r in refs:
                             purch_ref_to_rows.setdefault(r, []).append(idx)
 
