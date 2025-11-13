@@ -579,6 +579,19 @@ def purchase_webhook():
         
         return f"Processing error: {e}", 500
 
+# ----------- PACKAGE ORDER WEBHOOK -----------
+@app.route('zoho/webhook/delivered', methods=['POST'])
+def handle_delivery():
+    data = request.json
+    print(f"📦 Received delivered package:")
+    print(f"   SO Number: {data.get('sales_order_number')}")
+    print(f"   Package ID: {data.get('package_id')}")
+    
+    # Add your Excel automation here
+    # update_excel(data.get('sales_order_number'))
+    
+    return jsonify({"status": "success", "message": "Received"})
+
 # -----------MAIL WEBHOOK -----------
 def safe_request(method, url, **kwargs):
     """Wrapper to apply a default timeout and route through our retrying session."""
