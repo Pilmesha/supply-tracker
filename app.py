@@ -580,7 +580,7 @@ def purchase_webhook():
         return f"Processing error: {e}", 500
 
 # ----------- PACKAGE ORDER WEBHOOK -----------
-@app.route('zoho/webhook/delivered', methods=['POST'])
+@app.route('/zoho/webhook/delivered', methods=['POST'])
 def handle_delivery():
     data = request.json
     print(f"📦 Received delivered package:")
