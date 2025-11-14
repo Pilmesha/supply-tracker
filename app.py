@@ -550,12 +550,12 @@ def process_shipment(order_number: str) -> None:
         resp.raise_for_status()
         
         data = resp.json()["values"]
-        if not data or len(data) <= 1:  # Only header or empty
+        if not data or len(data) <= 1:
             print(f"⚠️ No data found in source sheet")
             return
             
-        # Convert to DataFrame
         df_source = pd.DataFrame(data[1:], columns=data[0])
+        original_columns = data[0]  # Keep original column order
 
         # --- Step 2: Find matching rows ---
         matching_rows = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].copy()
@@ -572,27 +572,28 @@ def process_shipment(order_number: str) -> None:
         print("📤 Appending to target sheet...")
         append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
 
-        # --- Step 4: Remove from source sheet via Graph API ---
-        # Get the actual row numbers in Excel (1-based indexing)
-        rows_to_remove = []
-        for idx in matching_rows.index:
-            excel_row_number = idx + 2  # +1 for header, +1 for 1-based indexing
-            rows_to_remove.append(excel_row_number)
+        # --- Step 4: Clear matching rows from source sheet ---
+        matching_indices = matching_rows.index.tolist()
+        print(f"🗑️ Clearing rows at indices: {matching_indices}")
 
-        print(f"🗑️ Deleting rows: {rows_to_remove}")
-
-        # Delete rows from bottom to top to avoid index shifting
-        for row_num in sorted(rows_to_remove, reverse=True):
-            # Use itemIndex = row_num - 1 (0-based index for the API)
-            url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/rows(itemIndex={row_num-1})"
+        for idx in matching_indices:
+            excel_row = idx + 2  # Convert to Excel row number (1-based + header)
             
-            print(f"🔧 Attempting to delete row {row_num} (itemIndex={row_num-1})")
+            # Create empty values for the entire row
+            empty_values = [[""] * len(original_columns)]  # 2D array with one row of empty strings
             
-            resp = HTTP.delete(url_delete, headers=headers)
-            if resp.status_code in [200, 204]:
-                print(f"✅ Successfully deleted row {row_num}")
+            # Update the specific row range
+            range_address = f"{source_sheet}!A{excel_row}:{get_column_letter(len(original_columns))}{excel_row}"
+            url_update = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/range(address='{range_address}')"
+            
+            payload = {"values": empty_values}
+            print(f"🔧 Clearing row {excel_row} with range: {range_address}")
+            
+            resp = HTTP.patch(url_update, headers=headers, json=payload)
+            if resp.status_code == 200:
+                print(f"✅ Successfully cleared row {excel_row}")
             else:
-                print(f"❌ Failed to delete row {row_num}: {resp.status_code} - {resp.text}")
+                print(f"❌ Failed to clear row {excel_row}: {resp.status_code} - {resp.text}")
 
         print(f"✅ Successfully processed SO {order_number}")
 
@@ -600,6 +601,14 @@ def process_shipment(order_number: str) -> None:
         print(f"❌ Fatal error: {e}")
         import traceback
         traceback.print_exc()
+
+def get_column_letter(n):
+    """Convert column number to letter (1->A, 2->B, etc.)"""
+    result = ""
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
 
 
 @app.route("/")
