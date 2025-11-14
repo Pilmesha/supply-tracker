@@ -543,19 +543,12 @@ def process_shipment(order_number: str) -> None:
         source_sheet = "მიმდინარე "
         target_sheet = "ჩამოსული"
 
-        # --- Step 1: Get source data via Graph API ---
-        range_address = get_used_range(source_sheet)
-        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/usedRange"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-        resp = HTTP.get(url, headers=headers, params={"valuesOnly": "true"})
-        resp.raise_for_status()
-        
-        data = resp.json()["values"]
+        # --- Step 1: Get source data ---
+        data = get_used_range(source_sheet)  # reuse your get_used_range or similar function
         if not data:
             print(f"⚠️ No data found in source sheet")
             return
-            
-        # Convert to DataFrame
+        
         df_source = pd.DataFrame(data[1:], columns=data[0])
 
         # --- Step 2: Find matching rows ---
@@ -564,26 +557,32 @@ def process_shipment(order_number: str) -> None:
             print(f"⚠️ No rows found for SO {order_number}")
             return
 
-        # Update location column
+        # Update location
         matching_rows['ადგილმდებარეობა'] = "ჩამოვიდა"
 
-        # --- Step 3: Append to target sheet via Graph API ---
+        # --- Step 3: Append to target sheet ---
         append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
 
-        # --- Step 4: Remove from source sheet via Graph API ---
-        rows_to_remove = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].index.tolist()
+        # --- Step 4: Remove rows from source table ---
+        # Get table name
+        table_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/tables"
+        tables_resp = HTTP.get(table_url, headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"})
+        tables_resp.raise_for_status()
+        tables = tables_resp.json().get("value", [])
+        if not tables:
+            print("⚠️ No tables found in source sheet, cannot delete rows safely")
+            return
+        table_name = tables[0]["name"]  # assuming first table is the one
 
-        # Delete rows from bottom to top
-        for idx in sorted(rows_to_remove, reverse=True):
-            # Excel rows are 1-indexed and +1 for header
-            excel_row_num = idx + 2
-            row_range = f"A{excel_row_num}:{chr(64 + len(df_source.columns))}{excel_row_num}"  # e.g., A2:D2
-            url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/range(address='{row_range}')/delete"
-            resp = HTTP.post(url_delete, headers=headers, json={"shift": "Up"})  # shift rows up
+        # Delete table rows from bottom to top
+        for idx in sorted(df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].index, reverse=True):
+            # Graph table rows are 0-indexed
+            url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/{idx}"
+            resp = HTTP.delete(url_delete, headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"})
             if resp.status_code not in [200, 204]:
-                print(f"⚠️ Failed to delete row {excel_row_num}: {resp.status_code} - {resp.text}")
+                print(f"⚠️ Failed to delete table row {idx + 2}: {resp.status_code} - {resp.text}")
             else:
-                print(f"✅ Deleted row {excel_row_num} from source sheet")
+                print(f"✅ Deleted table row {idx + 2}")
 
         print(f"✅ Successfully processed SO {order_number}")
 
@@ -591,6 +590,7 @@ def process_shipment(order_number: str) -> None:
         print(f"❌ Fatal error: {e}")
         import traceback
         traceback.print_exc()
+
 
 
 
