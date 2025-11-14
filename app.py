@@ -714,7 +714,7 @@ def purchase_webhook():
 @app.route('/zoho/webhook/delivered', methods=['POST'])
 def handle_delivery():
     One_Drive_Auth()
-    if not verify_zoho_signature(request, "purchaseorders"):
+    if not verify_zoho_signature(request, "shipmentorders"):
             return "Invalid signature", 403
     order_num = request.json.get("data", {}).get("sales_order_number")
 
