@@ -542,20 +542,21 @@ def process_shipment(order_number: str) -> None:
     try:
         source_sheet = "მიმდინარე "
         target_sheet = "ჩამოსული"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
         # --- Step 1: Get source data via Graph API ---
+        range_address = get_used_range(source_sheet)
         url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/usedRange"
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
         resp = HTTP.get(url, headers=headers, params={"valuesOnly": "true"})
         resp.raise_for_status()
         
         data = resp.json()["values"]
-        if not data or len(data) <= 1:
+        if not data:
             print(f"⚠️ No data found in source sheet")
             return
             
+        # Convert to DataFrame
         df_source = pd.DataFrame(data[1:], columns=data[0])
-        original_columns = data[0]  # Keep original column order
 
         # --- Step 2: Find matching rows ---
         matching_rows = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].copy()
@@ -563,37 +564,26 @@ def process_shipment(order_number: str) -> None:
             print(f"⚠️ No rows found for SO {order_number}")
             return
 
-        print(f"📍 Found {len(matching_rows)} rows for SO {order_number}")
-
         # Update location column
         matching_rows['ადგილმდებარეობა'] = "ჩამოვიდა"
 
         # --- Step 3: Append to target sheet via Graph API ---
-        print("📤 Appending to target sheet...")
         append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
 
-        # --- Step 4: Clear matching rows from source sheet ---
-        matching_indices = matching_rows.index.tolist()
-        print(f"🗑️ Clearing rows at indices: {matching_indices}")
+        # --- Step 4: Remove from source sheet via Graph API ---
+        rows_to_remove = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].index.tolist()
 
-        for idx in matching_indices:
-            excel_row = idx + 2  # Convert to Excel row number (1-based + header)
-            
-            # Create empty values for the entire row
-            empty_values = [[""] * len(original_columns)]  # 2D array with one row of empty strings
-            
-            # Update the specific row range
-            range_address = f"{source_sheet}!A{excel_row}:{get_column_letter(len(original_columns))}{excel_row}"
-            url_update = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/range(address='{range_address}')"
-            
-            payload = {"values": empty_values}
-            print(f"🔧 Clearing row {excel_row} with range: {range_address}")
-            
-            resp = HTTP.patch(url_update, headers=headers, json=payload)
-            if resp.status_code == 200:
-                print(f"✅ Successfully cleared row {excel_row}")
+        # Delete rows from bottom to top
+        for idx in sorted(rows_to_remove, reverse=True):
+            # Excel rows are 1-indexed and +1 for header
+            excel_row_num = idx + 2
+            row_range = f"A{excel_row_num}:{chr(64 + len(df_source.columns))}{excel_row_num}"  # e.g., A2:D2
+            url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/range(address='{row_range}')/delete"
+            resp = HTTP.post(url_delete, headers=headers, json={"shift": "Up"})  # shift rows up
+            if resp.status_code not in [200, 204]:
+                print(f"⚠️ Failed to delete row {excel_row_num}: {resp.status_code} - {resp.text}")
             else:
-                print(f"❌ Failed to clear row {excel_row}: {resp.status_code} - {resp.text}")
+                print(f"✅ Deleted row {excel_row_num} from source sheet")
 
         print(f"✅ Successfully processed SO {order_number}")
 
@@ -602,13 +592,6 @@ def process_shipment(order_number: str) -> None:
         import traceback
         traceback.print_exc()
 
-def get_column_letter(n):
-    """Convert column number to letter (1->A, 2->B, etc.)"""
-    result = ""
-    while n > 0:
-        n, remainder = divmod(n - 1, 26)
-        result = chr(65 + remainder) + result
-    return result
 
 
 @app.route("/")
