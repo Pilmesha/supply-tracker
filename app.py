@@ -237,13 +237,7 @@ def get_table_columns(table_name):
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
-def get_table_range(table_name):
-    """Get the range address of a table"""
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/range"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    resp = HTTP.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.json()["address"]
+
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
@@ -547,29 +541,10 @@ def monday_job():
 def process_shipment(order_number: str) -> None:
     with EXCEL_LOCK:
         try:
-            # --- Step 1: Ensure OneDrive token and download file ---
             headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-
-            max_attempts = 6
-            for attempt in range(max_attempts):
-                try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
-                    resp.raise_for_status()
-                    file_stream = io.BytesIO(resp.content)
-                    break
-                except Exception as e:
-                    wait = min(5 * (attempt + 1), 30)
-                    print(f"⚠️ Download error (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
-                    time.sleep(wait)
-            else:
-                raise RuntimeError("❌ Failed to download Excel file after multiple attempts")
-
-            # --- Step 2: Move rows via Graph API tables ---
             source_sheet = "მიმდინარე "
             target_sheet = "ჩამოსული"
 
-            # Retry wrapper for table operations
             def safe_graph_call(func, retries=5):
                 for attempt in range(retries):
                     try:
@@ -580,7 +555,7 @@ def process_shipment(order_number: str) -> None:
                         time.sleep(wait)
                 raise RuntimeError(f"❌ Failed Graph API operation after {retries} retries")
 
-            # Fetch source table, range, and columns
+            # Get source table info
             source_range = safe_graph_call(lambda: get_used_range(source_sheet))
             source_table = safe_graph_call(lambda: create_table_if_not_exists(source_range, has_headers=True))
             source_columns = safe_graph_call(lambda: get_table_columns(source_table))
@@ -588,121 +563,74 @@ def process_shipment(order_number: str) -> None:
             if "SO" not in source_columns:
                 print("⚠️ Source table does not contain SO column")
                 return
-            so_index = source_columns.index("SO")
 
-            # Fetch all source rows
+            # Get all rows from source table
             def fetch_source_rows():
                 url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows"
                 resp = HTTP.get(url, headers=headers)
                 resp.raise_for_status()
                 return resp.json().get("value", [])
+            
             source_rows = safe_graph_call(fetch_source_rows)
 
-            # Separate matching rows and preserve formatting data
-            matching = []
-            remaining = []
-            matching_row_data = []  # Store complete row objects for formatting
-            
+            # Convert rows to DataFrame
+            rows_data = []
             for row in source_rows:
                 values = row["values"][0]
-                if len(values) > so_index and str(values[so_index]).strip() == str(order_number):
-                    # Update status column if exists, else append new
-                    if "ადგილმდებარეობა" in source_columns:
-                        loc_index = source_columns.index("ადგილმდებარეობა")
-                        values[loc_index] = "ჩაბარდა"
+                row_dict = {}
+                for col_idx, col_name in enumerate(source_columns):
+                    if col_idx < len(values):
+                        row_dict[col_name] = values[col_idx]
                     else:
-                        values.append("ჩაბარდა")
-                    matching.append(values)
-                    matching_row_data.append(row)  # Store complete row object with formatting info
-                else:
-                    remaining.append(values)
+                        row_dict[col_name] = ""
+                rows_data.append(row_dict)
 
-            if not matching:
+            source_df = pd.DataFrame(rows_data)
+
+            # Filter rows with matching SO number
+            matching_df = source_df[source_df['SO'].astype(str).str.strip() == str(order_number).strip()].copy()
+            
+            if matching_df.empty:
                 print(f"⚠️ No rows found for SO {order_number}")
                 return
 
-            # Ensure target table exists
-            target_range = safe_graph_call(lambda: get_used_range(target_sheet))
-            target_table = safe_graph_call(lambda: create_table_if_not_exists(target_range, has_headers=True))
-            target_columns = safe_graph_call(lambda: get_table_columns(target_table))
+            print(f"🔍 Found {len(matching_df)} matching rows for SO {order_number}")
 
-            if target_columns != source_columns:
-                print("⚠️ Target and source table columns do not match - adjusting target table...")
-                # Update target table columns to match source
-                for i, col_name in enumerate(source_columns):
-                    if i < len(target_columns) and target_columns[i] != col_name:
-                        # Update column name
-                        col_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/columns/{i+1}"
-                        payload = {"name": col_name}
-                        HTTP.patch(col_url, headers={**headers, "Content-Type": "application/json"}, json=payload)
-                    elif i >= len(target_columns):
-                        # Add new column
-                        add_col_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/columns/add"
-                        payload = {"name": col_name}
-                        HTTP.post(add_col_url, headers={**headers, "Content-Type": "application/json"}, json=payload)
+            # Set ადგილმდებარეობა to "ჩამოსული"
+            if 'ადგილმდებარეობა' in matching_df.columns:
+                matching_df['ადგილმდებარეობა'] = 'ჩამოსული'
+            else:
+                # If column doesn't exist, add it
+                matching_df['ადგილმდებარეობა'] = 'ჩამოსული'
 
-            # Append matching rows to target table with formatting preservation
-            def append_to_target():
-                url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/rows/add"
-                for rowvals in matching:
-                    payload = {"values": [rowvals]}
-                    resp_add = HTTP.post(url_add, headers={**headers, "Content-Type": "application/json"}, json=payload)
-                    resp_add.raise_for_status()
-            safe_graph_call(append_to_target)
-            print(f"✅ Moved {len(matching)} rows to {target_sheet}")
+            # Append to target sheet using existing function
+            append_dataframe_to_table(matching_df, sheet_name=target_sheet)
+            print(f"✅ Appended {len(matching_df)} rows to {target_sheet}")
 
-            # Clear and rebuild source table with remaining rows
-            def reset_source_rows():
-                # Get current table range to preserve formatting
-                table_range = safe_graph_call(lambda: get_table_range(source_table))
+            # Remove matching rows from source
+            # Find indices of matching rows
+            matching_indices = source_df[source_df['SO'].astype(str).str.strip() == str(order_number).strip()].index.tolist()
+            
+            def delete_matching_rows():
+                # Sort indices in descending order for safe deletion
+                matching_indices_sorted = sorted(matching_indices, reverse=True)
                 
-                # Clear all data rows (keeping headers and formatting)
-                clear_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/dataBodyRange/clear"
-                HTTP.post(clear_url, headers={**headers, "Content-Type": "application/json"}, json={"applyTo": "all"})
+                for row_index in matching_indices_sorted:
+                    delete_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows/itemAt(index={row_index})"
+                    resp = HTTP.delete(delete_url, headers=headers)
+                    resp.raise_for_status()
                 
-                # If we have remaining rows, add them back
-                if remaining:
-                    url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows/add"
-                    for rowvals in remaining:
-                        payload = {"values": [rowvals]}
-                        resp_add = HTTP.post(url_add, headers={**headers, "Content-Type": "application/json"}, json=payload)
-                        resp_add.raise_for_status()
-                
-                # Resize table to fit the new data range
-                if remaining:
-                    # Calculate new range based on remaining rows count
-                    worksheet_name = source_range.split('!')[0]
-                    range_match = re.search(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', source_range)
-                    if range_match:
-                        start_col, start_row, end_col, end_row = range_match.groups()
-                        new_end_row = str(int(start_row) + len(remaining))
-                        new_range = f"{worksheet_name}!{start_col}{start_row}:{end_col}{new_end_row}"
-                        
-                        resize_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/range"
-                        payload = {"address": new_range}
-                        HTTP.patch(resize_url, headers={**headers, "Content-Type": "application/json"}, json=payload)
-                
-                print(f"🗑️ Removed matching rows from {source_sheet}, kept {len(remaining)} rows")
+                print(f"🗑️ Removed {len(matching_indices_sorted)} rows from {source_sheet}")
+            
+            safe_graph_call(delete_matching_rows)
 
-            safe_graph_call(reset_source_rows)
-
-            # Refresh tables to ensure formatting is maintained
-            def refresh_tables():
-                # Refresh source table
-                url_refresh = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/reapply"
-                HTTP.post(url_refresh, headers=headers)
-                
-                # Refresh target table  
-                url_refresh_target = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/reapply"
-                HTTP.post(url_refresh_target, headers=headers)
-                
-            safe_graph_call(refresh_tables)
-            print("✅ Tables refreshed and formatting maintained")
+            print(f"🎉 Successfully processed SO {order_number}")
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
             import traceback
             traceback.print_exc()
+
 
 
 
