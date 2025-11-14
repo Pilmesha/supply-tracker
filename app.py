@@ -540,96 +540,101 @@ def monday_job():
 
 def process_shipment(order_number: str) -> None:
     with EXCEL_LOCK:
+        wb = None
+        file_stream = None
         try:
             headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
             source_sheet = "მიმდინარე "
             target_sheet = "ჩამოსული"
 
-            def safe_graph_call(func, retries=5):
-                for attempt in range(retries):
-                    try:
-                        return func()
-                    except Exception as e:
-                        wait = min(5 * (attempt + 1), 20)
-                        print(f"⚠️ Graph API error: {e}. Retry {attempt+1}/{retries} in {wait}s...")
-                        time.sleep(wait)
-                raise RuntimeError(f"❌ Failed Graph API operation after {retries} retries")
+            # --- Step 1: Download workbook from OneDrive ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            max_attempts = 6
+            for attempt in range(max_attempts):
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    break
+                except Exception as e:
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ Download error (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                    time.sleep(wait)
+            else:
+                raise RuntimeError("❌ Failed to download Excel file after multiple attempts")
 
-            # Get source table info
-            source_range = safe_graph_call(lambda: get_used_range(source_sheet))
-            source_table = safe_graph_call(lambda: create_table_if_not_exists(source_range, has_headers=True))
-            source_columns = safe_graph_call(lambda: get_table_columns(source_table))
+            wb = load_workbook(file_stream)
 
-            if "SO" not in source_columns:
-                print("⚠️ Source table does not contain SO column")
+            # --- Step 2: Load source sheet into DataFrame ---
+            if source_sheet in wb.sheetnames:
+                ws_source = wb[source_sheet]
+                df_source = pd.DataFrame(ws_source.values)
+                df_source.columns = df_source.iloc[0]  # header
+                df_source = df_source[1:].reset_index(drop=True)
+            else:
+                print(f"⚠️ Source sheet '{source_sheet}' not found")
                 return
 
-            # Get all rows from source table
-            def fetch_source_rows():
-                url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows"
-                resp = HTTP.get(url, headers=headers)
-                resp.raise_for_status()
-                return resp.json().get("value", [])
-            
-            source_rows = safe_graph_call(fetch_source_rows)
-
-            # Convert rows to DataFrame
-            rows_data = []
-            for row in source_rows:
-                values = row["values"][0]
-                row_dict = {}
-                for col_idx, col_name in enumerate(source_columns):
-                    if col_idx < len(values):
-                        row_dict[col_name] = values[col_idx]
-                    else:
-                        row_dict[col_name] = ""
-                rows_data.append(row_dict)
-
-            source_df = pd.DataFrame(rows_data)
-
-            # Filter rows with matching SO number
-            matching_df = source_df[source_df['SO'].astype(str).str.strip() == str(order_number).strip()].copy()
-            
-            if matching_df.empty:
+            # --- Step 3: Select rows matching the SO number ---
+            matching_rows = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].copy()
+            if matching_rows.empty:
                 print(f"⚠️ No rows found for SO {order_number}")
                 return
 
-            print(f"🔍 Found {len(matching_df)} matching rows for SO {order_number}")
+            # Update ადგილმდებარეობა column
+            matching_rows['ადგილმდებარეობა'] = "ჩამოსული"
 
-            # Set ადგილმდებარეობა to "ჩამოსული"
-            if 'ადგილმდებარეობა' in matching_df.columns:
-                matching_df['ადგილმდებარეობა'] = 'ჩამოსული'
+            # --- Step 4: Append matching rows to target table ---
+            append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
+
+            # --- Step 5: Remove moved rows from source sheet ---
+            df_source = df_source[df_source["SO"].astype(str).str.strip() != str(order_number).strip()]
+
+            # Write back updated source sheet
+            ws_source.delete_rows(2, ws_source.max_row)  # clear old rows
+            # Write header
+            for c_idx, col_name in enumerate(df_source.columns.tolist(), start=1):
+                ws_source.cell(row=1, column=c_idx).value = col_name
+            # Write data
+            for r_idx, row in enumerate(df_source.values.tolist(), start=2):
+                for c_idx, val in enumerate(row, start=1):
+                    ws_source.cell(row=r_idx, column=c_idx).value = val
+
+            # --- Step 6: Save workbook to memory ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            # --- Step 7: Upload workbook back to OneDrive with retries ---
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                if resp.status_code in (423, 409):  # locked
+                    wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
+                    print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
+                resp.raise_for_status()
+                print(f"✅ Successfully updated workbook after moving SO {order_number}")
+                break
             else:
-                # If column doesn't exist, add it
-                matching_df['ადგილმდებარეობა'] = 'ჩამოსული'
-
-            # Append to target sheet using existing function
-            append_dataframe_to_table(matching_df, sheet_name=target_sheet)
-            print(f"✅ Appended {len(matching_df)} rows to {target_sheet}")
-
-            # Remove matching rows from source
-            # Find indices of matching rows
-            matching_indices = source_df[source_df['SO'].astype(str).str.strip() == str(order_number).strip()].index.tolist()
-            
-            def delete_matching_rows():
-                # Sort indices in descending order for safe deletion
-                matching_indices_sorted = sorted(matching_indices, reverse=True)
-                
-                for row_index in matching_indices_sorted:
-                    delete_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows/itemAt(index={row_index})"
-                    resp = HTTP.delete(delete_url, headers=headers)
-                    resp.raise_for_status()
-                
-                print(f"🗑️ Removed {len(matching_indices_sorted)} rows from {source_sheet}")
-            
-            safe_graph_call(delete_matching_rows)
-
-            print(f"🎉 Successfully processed SO {order_number}")
+                raise RuntimeError("❌ Failed to upload workbook after max retries")
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            if wb:
+                try: wb.close()
+                except: pass
+            if file_stream:
+                try: file_stream.close()
+                except: pass
+            import gc
+            gc.collect()
+
 
 
 
