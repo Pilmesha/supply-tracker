@@ -542,16 +542,15 @@ def process_shipment(order_number: str) -> None:
     try:
         source_sheet = "მიმდინარე "
         target_sheet = "ჩამოსული"
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
         # --- Step 1: Get source data via Graph API ---
-        range_address = get_used_range(source_sheet)
         url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/usedRange"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
         resp = HTTP.get(url, headers=headers, params={"valuesOnly": "true"})
         resp.raise_for_status()
         
         data = resp.json()["values"]
-        if not data:
+        if not data or len(data) <= 1:  # Only header or empty
             print(f"⚠️ No data found in source sheet")
             return
             
@@ -564,25 +563,36 @@ def process_shipment(order_number: str) -> None:
             print(f"⚠️ No rows found for SO {order_number}")
             return
 
+        print(f"📍 Found {len(matching_rows)} rows for SO {order_number}")
+
         # Update location column
         matching_rows['ადგილმდებარეობა'] = "ჩამოვიდა"
 
         # --- Step 3: Append to target sheet via Graph API ---
+        print("📤 Appending to target sheet...")
         append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
 
         # --- Step 4: Remove from source sheet via Graph API ---
-        # Get indices of rows to remove (add 2 because Excel is 1-indexed and we have header)
-        rows_to_remove = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].index.tolist()
-        rows_to_remove = [idx + 2 for idx in rows_to_remove]  # Convert to Excel row numbers
-        
+        # Get the actual row numbers in Excel (1-based indexing)
+        rows_to_remove = []
+        for idx in matching_rows.index:
+            excel_row_number = idx + 2  # +1 for header, +1 for 1-based indexing
+            rows_to_remove.append(excel_row_number)
+
+        print(f"🗑️ Deleting rows: {rows_to_remove}")
+
         # Delete rows from bottom to top to avoid index shifting
         for row_num in sorted(rows_to_remove, reverse=True):
+            # Use itemIndex = row_num - 1 (0-based index for the API)
             url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/rows(itemIndex={row_num-1})"
+            
+            print(f"🔧 Attempting to delete row {row_num} (itemIndex={row_num-1})")
+            
             resp = HTTP.delete(url_delete, headers=headers)
-            if resp.status_code not in [200, 204]:
-                print(f"⚠️ Failed to delete row {row_num}: {resp.status_code}")
+            if resp.status_code in [200, 204]:
+                print(f"✅ Successfully deleted row {row_num}")
             else:
-                print(f"✅ Deleted row {row_num} from source sheet")
+                print(f"❌ Failed to delete row {row_num}: {resp.status_code} - {resp.text}")
 
         print(f"✅ Successfully processed SO {order_number}")
 
