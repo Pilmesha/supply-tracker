@@ -284,6 +284,15 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
     else:
         print("❌ Error response content (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
+
+def get_sheet_values(sheet_name="მიმდინარე "):
+    """Fetch all cell values (including headers) from a worksheet."""
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange(valuesOnly=true)"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    resp = HTTP.get(url, headers=headers)
+    resp.raise_for_status()
+    result = resp.json()
+    return result.get("values", [])  # list of rows
 def update_excel(new_df: pd.DataFrame) -> None:
     """
     Update Excel file with new data.
@@ -401,7 +410,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
                         continue
 
                     resp.raise_for_status()
-                    range_address = get_used_range("მიმდინარე ")
+                    range_address = get_sheet_values("მიმდინარე ")
                     table_name = create_table_if_not_exists(range_address)
                     print(f"✅ Upload successful. Created table named {table_name}")
                     return
@@ -544,12 +553,21 @@ def process_shipment(order_number: str) -> None:
         target_sheet = "ჩამოსული"
 
         # --- Step 1: Get source data ---
-        data = get_used_range(source_sheet)  # reuse your get_used_range or similar function
-        if not data:
-            print(f"⚠️ No data found in source sheet")
+        data = get_used_range(source_sheet)
+        if not data or not isinstance(data, list) or len(data) < 2:
+            print(f"⚠️ No data found or insufficient rows in source sheet")
             return
-        
-        df_source = pd.DataFrame(data[1:], columns=data[0])
+
+        # Ensure each row is a list
+        data = [list(row) for row in data]
+
+        # Create DataFrame safely
+        try:
+            df_source = pd.DataFrame(data[1:], columns=data[0])
+        except Exception as df_e:
+            print(f"❌ Failed to construct DataFrame: {df_e}")
+            print("Data preview:", data)
+            return
 
         # --- Step 2: Find matching rows ---
         matching_rows = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].copy()
@@ -564,7 +582,6 @@ def process_shipment(order_number: str) -> None:
         append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
 
         # --- Step 4: Remove rows from source table ---
-        # Get table name
         table_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/tables"
         tables_resp = HTTP.get(table_url, headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"})
         tables_resp.raise_for_status()
@@ -572,11 +589,9 @@ def process_shipment(order_number: str) -> None:
         if not tables:
             print("⚠️ No tables found in source sheet, cannot delete rows safely")
             return
-        table_name = tables[0]["name"]  # assuming first table is the one
+        table_name = tables[0]["name"]
 
-        # Delete table rows from bottom to top
         for idx in sorted(df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].index, reverse=True):
-            # Graph table rows are 0-indexed
             url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/{idx}"
             resp = HTTP.delete(url_delete, headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"})
             if resp.status_code not in [200, 204]:
