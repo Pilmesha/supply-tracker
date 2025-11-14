@@ -240,54 +240,49 @@ def get_table_columns(table_name):
 
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
-    """Append a DataFrame to an Excel table using Graph API, safely targeting the correct sheet."""
+    """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
-
-    # --- Step 1: Get used range on this sheet ---
+    # Ensure table exists
     range_address = get_used_range(sheet_name)
+    table_name = create_table_if_not_exists(range_address)
+    # Handle Customer/Reference substitution
+    if "Customer" in df.columns and "Reference" in df.columns:
+        df = df.copy()
+        for index, row in df.iterrows():
+            customer_val = row['Customer']
+            if (customer_val is None or 
+                (isinstance(customer_val, str) and customer_val.strip() == "") or 
+                (pd.isna(customer_val))):
+                df.at[index, 'Customer'] = row['Reference']
 
-    # --- Step 2: Create table if not exists, force on this sheet ---
-    table_name = create_table_if_not_exists(range_address, has_headers=True)
-
-    # --- Step 3: Fetch table columns ---
+        # ✅ Drop Reference column after substitution
+        df = df.drop(columns=["Reference"])
+    # Fetch table columns
     table_columns = get_table_columns(table_name)
 
-    # --- Step 4: Normalize DataFrame ---
-    df_copy = df.copy()
-
-    # Customer/Reference substitution
-    if "Customer" in df_copy.columns and "Reference" in df_copy.columns:
-        for idx, row in df_copy.iterrows():
-            if not row['Customer'] or pd.isna(row['Customer']):
-                df_copy.at[idx, 'Customer'] = row['Reference']
-        df_copy = df_copy.drop(columns=["Reference"])
-
-    # Ensure all table columns exist in df
+    # Normalize DataFrame
+    new_df = df.copy()
     for col in table_columns:
-        if col not in df_copy.columns:
-            df_copy[col] = ""
+        if col not in new_df.columns:
+            new_df[col] = ""
+    new_df['#'] = range(1, len(new_df) + 1)
 
-    # Add '#' column if table has it
-    if "#" in table_columns and "#" not in df_copy.columns:
-        df_copy['#'] = range(1, len(df_copy) + 1)
+    # ✅ Restrict to table columns only
+    out_df = new_df[table_columns]
 
-    # Restrict df to table columns
-    out_df = df_copy[table_columns]
-
-    # --- Step 5: Convert to list of lists and post to Graph API ---
+    # Convert DataFrame → list of lists
     rows = out_df.fillna("").astype(str).values.tolist()
 
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
     payload = {"values": rows}
     resp = HTTP.post(url, headers=headers, json=payload)
-
     if resp.status_code in [200, 201]:
-        print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}' on sheet '{sheet_name}'")
+        print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
         return resp.json()
     else:
-        print("❌ Error response (truncated):", resp.text[:500])
+        print("❌ Error response content (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
 def update_excel(new_df: pd.DataFrame) -> None:
     """
@@ -544,105 +539,57 @@ def monday_job():
 
 
 def process_shipment(order_number: str) -> None:
-    with EXCEL_LOCK:
-        wb = None
-        file_stream = None
-        try:
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-            source_sheet = "მიმდინარე "
-            target_sheet = "ჩამოსული"
+    try:
+        source_sheet = "მიმდინარე "
+        target_sheet = "ჩამოსული"
 
-            # --- Step 1: Download workbook from OneDrive ---
-            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            max_attempts = 6
-            for attempt in range(max_attempts):
-                try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
-                    resp.raise_for_status()
-                    file_stream = io.BytesIO(resp.content)
-                    break
-                except Exception as e:
-                    wait = min(5 * (attempt + 1), 30)
-                    print(f"⚠️ Download error (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
-                    time.sleep(wait)
+        # --- Step 1: Get source data via Graph API ---
+        range_address = get_used_range(source_sheet)
+        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/usedRange"
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+        resp = HTTP.get(url, headers=headers, params={"valuesOnly": "true"})
+        resp.raise_for_status()
+        
+        data = resp.json()["values"]
+        if not data:
+            print(f"⚠️ No data found in source sheet")
+            return
+            
+        # Convert to DataFrame
+        df_source = pd.DataFrame(data[1:], columns=data[0])
+
+        # --- Step 2: Find matching rows ---
+        matching_rows = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].copy()
+        if matching_rows.empty:
+            print(f"⚠️ No rows found for SO {order_number}")
+            return
+
+        # Update location column
+        matching_rows['ადგილმდებარეობა'] = "ჩამოვიდა"
+
+        # --- Step 3: Append to target sheet via Graph API ---
+        append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
+
+        # --- Step 4: Remove from source sheet via Graph API ---
+        # Get indices of rows to remove (add 2 because Excel is 1-indexed and we have header)
+        rows_to_remove = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].index.tolist()
+        rows_to_remove = [idx + 2 for idx in rows_to_remove]  # Convert to Excel row numbers
+        
+        # Delete rows from bottom to top to avoid index shifting
+        for row_num in sorted(rows_to_remove, reverse=True):
+            url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/rows(itemIndex={row_num-1})"
+            resp = HTTP.delete(url_delete, headers=headers)
+            if resp.status_code not in [200, 204]:
+                print(f"⚠️ Failed to delete row {row_num}: {resp.status_code}")
             else:
-                raise RuntimeError("❌ Failed to download Excel file after multiple attempts")
+                print(f"✅ Deleted row {row_num} from source sheet")
 
-            wb = load_workbook(file_stream)
+        print(f"✅ Successfully processed SO {order_number}")
 
-            # --- Step 2: Load source sheet into DataFrame ---
-            if source_sheet in wb.sheetnames:
-                ws_source = wb[source_sheet]
-                df_source = pd.DataFrame(ws_source.values)
-                df_source.columns = df_source.iloc[0]  # header
-                df_source = df_source[1:].reset_index(drop=True)
-            else:
-                print(f"⚠️ Source sheet '{source_sheet}' not found")
-                return
-
-            # --- Step 3: Select rows matching the SO number ---
-            matching_rows = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].copy()
-            if matching_rows.empty:
-                print(f"⚠️ No rows found for SO {order_number}")
-                return
-
-            # Update ადგილმდებარეობა column
-            matching_rows['ადგილმდებარეობა'] = "ჩაბარდა"
-
-            # --- Step 4: Append matching rows to target table ---
-            append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
-
-            # --- Step 5: Remove moved rows from source sheet ---
-            df_source = df_source[df_source["SO"].astype(str).str.strip() != str(order_number).strip()]
-
-            # Write back updated source sheet
-            ws_source.delete_rows(2, ws_source.max_row)  # clear old rows
-            # Write header
-            for c_idx, col_name in enumerate(df_source.columns.tolist(), start=1):
-                ws_source.cell(row=1, column=c_idx).value = col_name
-            # Write data
-            for r_idx, row in enumerate(df_source.values.tolist(), start=2):
-                for c_idx, val in enumerate(row, start=1):
-                    ws_source.cell(row=r_idx, column=c_idx).value = val
-
-            # --- Step 6: Save workbook to memory ---
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
-
-            # --- Step 7: Upload workbook back to OneDrive with retries ---
-            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            max_attempts = 10
-            for attempt in range(max_attempts):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-                if resp.status_code in (423, 409):  # locked
-                    wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
-                    print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-                    time.sleep(wait_time)
-                    continue
-                resp.raise_for_status()
-                print(f"✅ Successfully updated workbook after moving SO {order_number}")
-                break
-            else:
-                raise RuntimeError("❌ Failed to upload workbook after max retries")
-
-        except Exception as e:
-            print(f"❌ Fatal error: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            if wb:
-                try: wb.close()
-                except: pass
-            if file_stream:
-                try: file_stream.close()
-                except: pass
-            import gc
-            gc.collect()
-
-
-
-
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 @app.route("/")
