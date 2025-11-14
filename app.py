@@ -539,13 +539,10 @@ def monday_job():
 
 def process_shipment(order_number: str) -> None:
     with EXCEL_LOCK:
-        wb = None
-        file_stream = None
-
         try:
-            # --- Step 1: Download current file from OneDrive ---
-            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            # --- Step 1: Ensure OneDrive token and download file ---
             headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
 
             max_attempts = 6
             for attempt in range(max_attempts):
@@ -561,158 +558,94 @@ def process_shipment(order_number: str) -> None:
             else:
                 raise RuntimeError("❌ Failed to download Excel file after multiple attempts")
 
-            # --- Step 2: Load workbook ---
-            wb = load_workbook(file_stream)
-            SOURCE_SHEET = "მიმდინარე "
-            TARGET_SHEET = "ჩამოსული"
+            # --- Step 2: Move rows via Graph API tables ---
+            source_sheet = "მომდინარე "
+            target_sheet = "ჩამოსული"
 
-            if SOURCE_SHEET not in wb.sheetnames:
-                print("⚠️ Source sheet not found, nothing to process")
+            # Retry wrapper for table operations
+            def safe_graph_call(func, retries=5):
+                for attempt in range(retries):
+                    try:
+                        return func()
+                    except Exception as e:
+                        wait = min(5 * (attempt + 1), 20)
+                        print(f"⚠️ Graph API error: {e}. Retry {attempt+1}/{retries} in {wait}s...")
+                        time.sleep(wait)
+                raise RuntimeError(f"❌ Failed Graph API operation after {retries} retries")
+
+            # Fetch source table, range, and columns
+            source_range = safe_graph_call(lambda: get_used_range(source_sheet))
+            source_table = safe_graph_call(lambda: create_table_if_not_exists(source_range, has_headers=True))
+            source_columns = safe_graph_call(lambda: get_table_columns(source_table))
+
+            if "SO" not in source_columns:
+                print("⚠️ Source table does not contain SO column")
                 return
+            so_index = source_columns.index("SO")
 
-            ws = wb[SOURCE_SHEET]
-            df = pd.DataFrame(ws.values)
-            # First row is header:
-            raw_cols = list(df.iloc[0])
+            # Fetch all source rows
+            def fetch_source_rows():
+                url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows"
+                resp = HTTP.get(url, headers=headers)
+                resp.raise_for_status()
+                return resp.json().get("value", [])
+            source_rows = safe_graph_call(fetch_source_rows)
 
-            # Replace None / empty / NaN / duplicates
-            clean_cols = []
-            seen = set()
-            for col in raw_cols:
-                if col is None or col == "" or (isinstance(col, float) and pd.isna(col)):
-                    col = "Unnamed"
+            # Separate matching rows
+            matching = []
+            remaining = []
+            for row in source_rows:
+                values = row["values"][0]
+                if len(values) > so_index and str(values[so_index]).strip() == str(order_number):
+                    # Update status column if exists, else append new
+                    if "ადგილმდებარეობა" in source_columns:
+                        loc_index = source_columns.index("ადგილმდებარეობა")
+                        values[loc_index] = "ჩაბარდა"
+                    else:
+                        values.append("ჩაბარდა")
+                    matching.append(values)
+                else:
+                    remaining.append(values)
 
-                new_col = col
-                i = 1
-                while new_col in seen:
-                    new_col = f"{col}_{i}"
-                    i += 1
-                seen.add(new_col)
-                clean_cols.append(new_col)
-
-
-            df.columns = clean_cols
-            df = df[1:]  # Remove the header row
-            df = df.reset_index(drop=True)
-            # --- Step 3: Filter matching rows ---
-            matching_rows = df[df["SO"] == order_number].copy()
-            if matching_rows.empty:
+            if not matching:
                 print(f"⚠️ No rows found for SO {order_number}")
                 return
-            matching_rows.loc[:, "ადგილმდებარეობა"] = "ჩაბარდა"
-            # --- Step 4: Load/create target sheet ---
-            # --- Step 4: Load or create target sheet safely ---
-            if TARGET_SHEET in wb.sheetnames:
-                ws_target = wb[TARGET_SHEET]
-                target_df = pd.DataFrame(ws_target.values)
 
-                # Handle completely empty sheet
-                if target_df.empty:
-                    target_df = pd.DataFrame(columns=matching_rows.columns)
-                else:
-                    # Extract header row
-                    raw_cols = list(target_df.iloc[0])
+            # Ensure target table exists
+            target_range = safe_graph_call(lambda: get_used_range(target_sheet))
+            target_table = safe_graph_call(lambda: create_table_if_not_exists(target_range, has_headers=True))
+            target_columns = safe_graph_call(lambda: get_table_columns(target_table))
 
-                    # Clean + ensure unique header names
-                    clean_cols = []
-                    seen = set()
-                    for col in raw_cols:
-                        if col is None or col == "" or (isinstance(col, float) and pd.isna(col)):
-                            col = "Unnamed"
-                        new_col = col
-                        i = 1
-                        while new_col in seen:
-                            new_col = f"{col}_{i}"
-                            i += 1
-                        seen.add(new_col)
-                        clean_cols.append(new_col)
+            if target_columns != source_columns:
+                raise Exception("❌ Target and source table columns do not match — cannot move rows safely.")
 
-                    target_df.columns = clean_cols
-                    target_df = target_df[1:].reset_index(drop=True)
+            # Append matching rows to target table
+            def append_to_target():
+                url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/rows/add"
+                for rowvals in matching:
+                    payload = {"values": [rowvals]}
+                    resp_add = HTTP.post(url_add, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                    resp_add.raise_for_status()
+            safe_graph_call(append_to_target)
+            print(f"✅ Moved {len(matching)} rows to {target_sheet}")
 
-                # Append new rows
-                target_df = pd.concat([target_df, matching_rows], ignore_index=True)
-
-            else:
-                # If target sheet doesn't exist, use matching rows directly
-                target_df = matching_rows.copy()
-
-
-            # --- Step 5: Write updated target sheet ---
-            if TARGET_SHEET in wb.sheetnames:
-                del wb[TARGET_SHEET]
-
-            wb.create_sheet(TARGET_SHEET)
-            ws_new = wb[TARGET_SHEET]
-
-            # Write headers
-            for c_idx, col in enumerate(target_df.columns, start=1):
-                ws_new.cell(row=1, column=c_idx, value=col)
-
-            # Write data rows
-            for r_idx, row in enumerate(target_df.itertuples(index=False, name=None), start=2):
-                for c_idx, val in enumerate(row, start=1):
-                    ws_new.cell(row=r_idx, column=c_idx, value=val)
-
-            # --- Step 6: Remove processed rows from source sheet ---
-            df = df[df["SO"] != order_number]
-            ws_source = wb[SOURCE_SHEET]
-            ws_source.delete_rows(2, ws_source.max_row)
-
-            for r_idx, row in enumerate(df.itertuples(index=False, name=None), start=2):
-                for c_idx, val in enumerate(row, start=1):
-                    ws_source.cell(row=r_idx, column=c_idx, value=val)
-
-            # --- Step 7: Save workbook to memory ---
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
-
-            # --- Step 8: Upload back with retry if locked ---
-            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            max_attempts = 10
-
-            for attempt in range(max_attempts):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-
-                # File locked → retry
-                if resp.status_code in (423, 409):
-                    wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
-                    print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-                    time.sleep(wait_time)
-                    continue
-
-                # Normal errors
-                resp.raise_for_status()
-
-                # Success → refresh table
-                range_address = get_used_range("მიმდინარე ")
-                table_name = create_table_if_not_exists(range_address)
-                print(f"✅ Upload successful. Created table named {table_name}")
-                return
-
-            else:
-                raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
-            # =========================================================
+            # Replace source table rows with remaining rows
+            def reset_source_rows():
+                # Delete all rows
+                delete_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows"
+                HTTP.delete(delete_url, headers=headers).raise_for_status()
+                # Re-insert remaining rows
+                url_add = delete_url + "/add"
+                for rowvals in remaining:
+                    payload = {"values": [rowvals]}
+                    resp_add = HTTP.post(url_add, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                    resp_add.raise_for_status()
+            safe_graph_call(reset_source_rows)
+            print(f"🗑️ Removed matching rows from {source_sheet}")
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
 
-        finally:
-            if wb:
-                try: wb.close()
-                except: pass
-
-            if file_stream:
-                try: file_stream.close()
-                except: pass
-
-            # Avoid NameErrors in finally
-            for var in ("existing_df", "new_df"):
-                if var in locals():
-                    del locals()[var]
-
-            gc.collect()
 
 
 
