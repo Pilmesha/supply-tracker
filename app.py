@@ -286,13 +286,19 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
 
 def get_sheet_values(sheet_name="მიმდინარე "):
-    """Fetch all cell values (including headers) from a worksheet."""
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange(valuesOnly=true)"
+    """Get actual usedRange values (including header row)."""
+    url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/"
+        f"{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange?$select=values"
+    )
+    
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
+
     result = resp.json()
-    return result.get("values", [])  # list of rows
+    return result.get("values", [])  # this is the list of rows
 def update_excel(new_df: pd.DataFrame) -> None:
     """
     Update Excel file with new data.
@@ -553,7 +559,7 @@ def process_shipment(order_number: str) -> None:
         target_sheet = "ჩამოსული"
 
         # --- Step 1: Get source data ---
-        data = get_used_range(source_sheet)
+        data = get_sheet_values(source_sheet)
         if not data or not isinstance(data, list) or len(data) < 2:
             print(f"⚠️ No data found or insufficient rows in source sheet")
             return
