@@ -70,9 +70,9 @@ def refresh_access_token()-> str:
 def verify_zoho_signature(request, expected_module):
     # Select secret based on webhook type
     secret_key = (
-        os.getenv('SALES_WEBHOOK_SECRET') 
-        if expected_module == "salesorders" 
-        else os.getenv('PURCHASE_WEBHOOK_SECRET')
+    os.getenv("SALES_WEBHOOK_SECRET") if expected_module == "salesorders"
+    else os.getenv("PURCHASE_WEBHOOK_SECRET") if expected_module == "purchaseorders"
+    else os.getenv("SHIPMENT_WEBHOOK_SECRET")
     ).encode('utf-8')
     
     received_sign = request.headers.get('X-Zoho-Webhook-Signature')
@@ -536,6 +536,137 @@ def monday_job():
         else:
             print("ℹ️ No new Saturday orders found, skipping cleanup.")
 
+
+def process_shipment(order_number: str) -> None:
+    with EXCEL_LOCK:
+        wb = None
+        file_stream = None
+
+        try:
+            # --- Step 1: Download current file from OneDrive ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+            max_attempts = 6
+            for attempt in range(max_attempts):
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    break
+                except Exception as e:
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ Download error (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                    time.sleep(wait)
+            else:
+                raise RuntimeError("❌ Failed to download Excel file after multiple attempts")
+
+            # --- Step 2: Load workbook ---
+            wb = load_workbook(file_stream)
+            SOURCE_SHEET = "მიმდინარე "
+            TARGET_SHEET = "ჩამოსული"
+
+            if SOURCE_SHEET not in wb.sheetnames:
+                print("⚠️ Source sheet not found, nothing to process")
+                return
+
+            ws = wb[SOURCE_SHEET]
+            df = pd.DataFrame(ws.values)
+            df.columns = df.iloc[0]
+            df = df[1:]
+
+            # --- Step 3: Filter matching rows ---
+            matching_rows = df[df["SO"] == order_number]
+            if matching_rows.empty:
+                print(f"⚠️ No rows found for SO {order_number}")
+                return
+
+            matching_rows["ადგილმდებარეობა"] = "ჩაბარდა"
+
+            # --- Step 4: Load/create target sheet ---
+            if TARGET_SHEET in wb.sheetnames:
+                ws_target = wb[TARGET_SHEET]
+                target_df = pd.DataFrame(ws_target.values)
+                target_df.columns = target_df.iloc[0]
+                target_df = target_df[1:]
+                target_df = pd.concat([target_df, matching_rows], ignore_index=True)
+            else:
+                target_df = matching_rows
+
+            # --- Step 5: Write updated target sheet ---
+            if TARGET_SHEET in wb.sheetnames:
+                del wb[TARGET_SHEET]
+
+            wb.create_sheet(TARGET_SHEET)
+            for c_idx, col in enumerate(target_df.columns, start=1):
+                wb[TARGET_SHEET].cell(row=1, column=c_idx, value=col)
+
+            for r_idx, row in enumerate(target_df.itertuples(index=False, name=None), start=2):
+                for c_idx, val in enumerate(row, start=1):
+                    wb[TARGET_SHEET].cell(row=r_idx, column=c_idx, value=val)
+
+            # --- Step 6: Remove processed rows from source sheet ---
+            df = df[df["SO"] != order_number]
+            ws_source = wb[SOURCE_SHEET]
+            ws_source.delete_rows(2, ws_source.max_row)
+
+            for r_idx, row in enumerate(df.itertuples(index=False, name=None), start=2):
+                for c_idx, val in enumerate(row, start=1):
+                    ws_source.cell(row=r_idx, column=c_idx, value=val)
+
+            # --- Step 7: Save workbook to memory ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            # --- Step 8: Upload back with retry if locked ---
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            max_attempts = 10
+
+            for attempt in range(max_attempts):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+
+                # File locked → retry
+                if resp.status_code in (423, 409):
+                    wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
+                    print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                # Normal errors
+                resp.raise_for_status()
+
+                # Success → refresh table
+                range_address = get_used_range("მიმდინარე ")
+                table_name = create_table_if_not_exists(range_address)
+                print(f"✅ Upload successful. Created table named {table_name}")
+                return
+
+            else:
+                raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
+            # =========================================================
+
+        except Exception as e:
+            print(f"❌ Fatal error: {e}")
+
+        finally:
+            if wb:
+                try: wb.close()
+                except: pass
+
+            if file_stream:
+                try: file_stream.close()
+                except: pass
+
+            # Avoid NameErrors in finally
+            for var in ("existing_df", "new_df"):
+                if var in locals():
+                    del locals()[var]
+
+            gc.collect()
+
+
+
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
@@ -582,15 +713,20 @@ def purchase_webhook():
 # ----------- PACKAGE ORDER WEBHOOK -----------
 @app.route('/zoho/webhook/delivered', methods=['POST'])
 def handle_delivery():
-    data = request.json
-    print(f"📦 Received delivered package:")
-    print(f"   SO Number: {data.get('sales_order_number')}")
-    print(f"   Package ID: {data.get('package_id')}")
-    
-    # Add your Excel automation here
-    # update_excel(data.get('sales_order_number'))
-    
-    return jsonify({"status": "success", "message": "Received"})
+    One_Drive_Auth()
+    if not verify_zoho_signature(request, "purchaseorders"):
+            return "Invalid signature", 403
+    order_num = request.json.get("data", {}).get("sales_order_number")
+
+    if not order_num:
+        return "Missing order ID", 400
+
+    try:
+        PO_future = POOL.submit(process_shipment, order_num)
+        return "OK", 200
+    except Exception as e:
+        
+        return f"Processing error: {e}", 500
 
 # -----------MAIL WEBHOOK -----------
 def safe_request(method, url, **kwargs):
