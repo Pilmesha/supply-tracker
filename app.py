@@ -559,7 +559,7 @@ def process_shipment(order_number: str) -> None:
                 raise RuntimeError("❌ Failed to download Excel file after multiple attempts")
 
             # --- Step 2: Move rows via Graph API tables ---
-            source_sheet = "მომდინარე "
+            source_sheet = "მიმდინარე "
             target_sheet = "ჩამოსული"
 
             # Retry wrapper for table operations
