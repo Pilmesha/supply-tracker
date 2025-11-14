@@ -240,49 +240,54 @@ def get_table_columns(table_name):
 
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
-    """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
+    """Append a DataFrame to an Excel table using Graph API, safely targeting the correct sheet."""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
-    # Ensure table exists
-    range_address = get_used_range(sheet_name)
-    table_name = create_table_if_not_exists(range_address)
-    # Handle Customer/Reference substitution
-    if "Customer" in df.columns and "Reference" in df.columns:
-        df = df.copy()
-        for index, row in df.iterrows():
-            customer_val = row['Customer']
-            if (customer_val is None or 
-                (isinstance(customer_val, str) and customer_val.strip() == "") or 
-                (pd.isna(customer_val))):
-                df.at[index, 'Customer'] = row['Reference']
 
-        # ✅ Drop Reference column after substitution
-        df = df.drop(columns=["Reference"])
-    # Fetch table columns
+    # --- Step 1: Get used range on this sheet ---
+    range_address = get_used_range(sheet_name)
+
+    # --- Step 2: Create table if not exists, force on this sheet ---
+    table_name = create_table_if_not_exists(range_address, has_headers=True)
+
+    # --- Step 3: Fetch table columns ---
     table_columns = get_table_columns(table_name)
 
-    # Normalize DataFrame
-    new_df = df.copy()
+    # --- Step 4: Normalize DataFrame ---
+    df_copy = df.copy()
+
+    # Customer/Reference substitution
+    if "Customer" in df_copy.columns and "Reference" in df_copy.columns:
+        for idx, row in df_copy.iterrows():
+            if not row['Customer'] or pd.isna(row['Customer']):
+                df_copy.at[idx, 'Customer'] = row['Reference']
+        df_copy = df_copy.drop(columns=["Reference"])
+
+    # Ensure all table columns exist in df
     for col in table_columns:
-        if col not in new_df.columns:
-            new_df[col] = ""
-    new_df['#'] = range(1, len(new_df) + 1)
+        if col not in df_copy.columns:
+            df_copy[col] = ""
 
-    # ✅ Restrict to table columns only
-    out_df = new_df[table_columns]
+    # Add '#' column if table has it
+    if "#" in table_columns and "#" not in df_copy.columns:
+        df_copy['#'] = range(1, len(df_copy) + 1)
 
-    # Convert DataFrame → list of lists
+    # Restrict df to table columns
+    out_df = df_copy[table_columns]
+
+    # --- Step 5: Convert to list of lists and post to Graph API ---
     rows = out_df.fillna("").astype(str).values.tolist()
 
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
     payload = {"values": rows}
     resp = HTTP.post(url, headers=headers, json=payload)
+
     if resp.status_code in [200, 201]:
-        print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
+        print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}' on sheet '{sheet_name}'")
         return resp.json()
     else:
-        print("❌ Error response content (truncated):", resp.text[:500])
+        print("❌ Error response (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
 def update_excel(new_df: pd.DataFrame) -> None:
     """
@@ -582,7 +587,7 @@ def process_shipment(order_number: str) -> None:
                 return
 
             # Update ადგილმდებარეობა column
-            matching_rows['ადგილმდებარეობა'] = "ჩამოსული"
+            matching_rows['ადგილმდებარეობა'] = "ჩაბარდა"
 
             # --- Step 4: Append matching rows to target table ---
             append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
