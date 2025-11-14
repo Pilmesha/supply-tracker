@@ -572,38 +572,87 @@ def process_shipment(order_number: str) -> None:
 
             ws = wb[SOURCE_SHEET]
             df = pd.DataFrame(ws.values)
-            df.columns = df.iloc[0]
-            df = df[1:]
+            # First row is header:
+            raw_cols = list(df.iloc[0])
 
+            # Replace None / empty / NaN / duplicates
+            clean_cols = []
+            seen = set()
+            for col in raw_cols:
+                if col is None or col == "" or (isinstance(col, float) and pd.isna(col)):
+                    col = "Unnamed"
+
+                new_col = col
+                i = 1
+                while new_col in seen:
+                    new_col = f"{col}_{i}"
+                    i += 1
+                seen.add(new_col)
+                clean_cols.append(new_col)
+
+
+            df.columns = clean_cols
+            df = df[1:]  # Remove the header row
+            df = df.reset_index(drop=True)
             # --- Step 3: Filter matching rows ---
-            matching_rows = df[df["SO"] == order_number]
+            matching_rows = df[df["SO"] == order_number].copy()
             if matching_rows.empty:
                 print(f"⚠️ No rows found for SO {order_number}")
                 return
-
-            matching_rows["ადგილმდებარეობა"] = "ჩაბარდა"
-
+            matching_rows.loc[:, "ადგილმდებარეობა"] = "ჩაბარდა"
             # --- Step 4: Load/create target sheet ---
+            # --- Step 4: Load or create target sheet safely ---
             if TARGET_SHEET in wb.sheetnames:
                 ws_target = wb[TARGET_SHEET]
                 target_df = pd.DataFrame(ws_target.values)
-                target_df.columns = target_df.iloc[0]
-                target_df = target_df[1:]
+
+                # Handle completely empty sheet
+                if target_df.empty:
+                    target_df = pd.DataFrame(columns=matching_rows.columns)
+                else:
+                    # Extract header row
+                    raw_cols = list(target_df.iloc[0])
+
+                    # Clean + ensure unique header names
+                    clean_cols = []
+                    seen = set()
+                    for col in raw_cols:
+                        if col is None or col == "" or (isinstance(col, float) and pd.isna(col)):
+                            col = "Unnamed"
+                        new_col = col
+                        i = 1
+                        while new_col in seen:
+                            new_col = f"{col}_{i}"
+                            i += 1
+                        seen.add(new_col)
+                        clean_cols.append(new_col)
+
+                    target_df.columns = clean_cols
+                    target_df = target_df[1:].reset_index(drop=True)
+
+                # Append new rows
                 target_df = pd.concat([target_df, matching_rows], ignore_index=True)
+
             else:
-                target_df = matching_rows
+                # If target sheet doesn't exist, use matching rows directly
+                target_df = matching_rows.copy()
+
 
             # --- Step 5: Write updated target sheet ---
             if TARGET_SHEET in wb.sheetnames:
                 del wb[TARGET_SHEET]
 
             wb.create_sheet(TARGET_SHEET)
-            for c_idx, col in enumerate(target_df.columns, start=1):
-                wb[TARGET_SHEET].cell(row=1, column=c_idx, value=col)
+            ws_new = wb[TARGET_SHEET]
 
+            # Write headers
+            for c_idx, col in enumerate(target_df.columns, start=1):
+                ws_new.cell(row=1, column=c_idx, value=col)
+
+            # Write data rows
             for r_idx, row in enumerate(target_df.itertuples(index=False, name=None), start=2):
                 for c_idx, val in enumerate(row, start=1):
-                    wb[TARGET_SHEET].cell(row=r_idx, column=c_idx, value=val)
+                    ws_new.cell(row=r_idx, column=c_idx, value=val)
 
             # --- Step 6: Remove processed rows from source sheet ---
             df = df[df["SO"] != order_number]
