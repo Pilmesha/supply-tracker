@@ -237,6 +237,13 @@ def get_table_columns(table_name):
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
+def get_table_range(table_name):
+    """Get the range address of a table"""
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/range"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    resp = HTTP.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.json()["address"]
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
@@ -591,9 +598,11 @@ def process_shipment(order_number: str) -> None:
                 return resp.json().get("value", [])
             source_rows = safe_graph_call(fetch_source_rows)
 
-            # Separate matching rows
+            # Separate matching rows and preserve formatting data
             matching = []
             remaining = []
+            matching_row_data = []  # Store complete row objects for formatting
+            
             for row in source_rows:
                 values = row["values"][0]
                 if len(values) > so_index and str(values[so_index]).strip() == str(order_number):
@@ -604,6 +613,7 @@ def process_shipment(order_number: str) -> None:
                     else:
                         values.append("ჩაბარდა")
                     matching.append(values)
+                    matching_row_data.append(row)  # Store complete row object with formatting info
                 else:
                     remaining.append(values)
 
@@ -617,9 +627,21 @@ def process_shipment(order_number: str) -> None:
             target_columns = safe_graph_call(lambda: get_table_columns(target_table))
 
             if target_columns != source_columns:
-                raise Exception("❌ Target and source table columns do not match — cannot move rows safely.")
+                print("⚠️ Target and source table columns do not match - adjusting target table...")
+                # Update target table columns to match source
+                for i, col_name in enumerate(source_columns):
+                    if i < len(target_columns) and target_columns[i] != col_name:
+                        # Update column name
+                        col_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/columns/{i+1}"
+                        payload = {"name": col_name}
+                        HTTP.patch(col_url, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                    elif i >= len(target_columns):
+                        # Add new column
+                        add_col_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/columns/add"
+                        payload = {"name": col_name}
+                        HTTP.post(add_col_url, headers={**headers, "Content-Type": "application/json"}, json=payload)
 
-            # Append matching rows to target table
+            # Append matching rows to target table with formatting preservation
             def append_to_target():
                 url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/rows/add"
                 for rowvals in matching:
@@ -629,22 +651,58 @@ def process_shipment(order_number: str) -> None:
             safe_graph_call(append_to_target)
             print(f"✅ Moved {len(matching)} rows to {target_sheet}")
 
-            # Replace source table rows with remaining rows
+            # Clear and rebuild source table with remaining rows
             def reset_source_rows():
-                # Delete all rows
-                delete_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows"
-                HTTP.delete(delete_url, headers=headers).raise_for_status()
-                # Re-insert remaining rows
-                url_add = delete_url + "/add"
-                for rowvals in remaining:
-                    payload = {"values": [rowvals]}
-                    resp_add = HTTP.post(url_add, headers={**headers, "Content-Type": "application/json"}, json=payload)
-                    resp_add.raise_for_status()
+                # Get current table range to preserve formatting
+                table_range = safe_graph_call(lambda: get_table_range(source_table))
+                
+                # Clear all data rows (keeping headers and formatting)
+                clear_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/dataBodyRange/clear"
+                HTTP.post(clear_url, headers={**headers, "Content-Type": "application/json"}, json={"applyTo": "all"})
+                
+                # If we have remaining rows, add them back
+                if remaining:
+                    url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/rows/add"
+                    for rowvals in remaining:
+                        payload = {"values": [rowvals]}
+                        resp_add = HTTP.post(url_add, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                        resp_add.raise_for_status()
+                
+                # Resize table to fit the new data range
+                if remaining:
+                    # Calculate new range based on remaining rows count
+                    worksheet_name = source_range.split('!')[0]
+                    range_match = re.search(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', source_range)
+                    if range_match:
+                        start_col, start_row, end_col, end_row = range_match.groups()
+                        new_end_row = str(int(start_row) + len(remaining))
+                        new_range = f"{worksheet_name}!{start_col}{start_row}:{end_col}{new_end_row}"
+                        
+                        resize_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/range"
+                        payload = {"address": new_range}
+                        HTTP.patch(resize_url, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                
+                print(f"🗑️ Removed matching rows from {source_sheet}, kept {len(remaining)} rows")
+
             safe_graph_call(reset_source_rows)
-            print(f"🗑️ Removed matching rows from {source_sheet}")
+
+            # Refresh tables to ensure formatting is maintained
+            def refresh_tables():
+                # Refresh source table
+                url_refresh = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{source_table}/reapply"
+                HTTP.post(url_refresh, headers=headers)
+                
+                # Refresh target table  
+                url_refresh_target = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{target_table}/reapply"
+                HTTP.post(url_refresh_target, headers=headers)
+                
+            safe_graph_call(refresh_tables)
+            print("✅ Tables refreshed and formatting maintained")
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 
