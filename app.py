@@ -632,7 +632,7 @@ def sales_webhook():
         return "Missing order ID", 400
 
     try:
-        append_dataframe_to_table(get_sales_order_df(order_id))
+        append_dataframe_to_table(get_sales_order_df(order_id), "მიმდინარე ")
         return "OK", 200
     except Exception as e:
         return f"Processing error: {e}", 500
