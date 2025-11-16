@@ -554,63 +554,49 @@ def monday_job():
 
 
 def process_shipment(order_number: str) -> None:
-    try:
-        source_sheet = "მიმდინარე "
-        target_sheet = "ჩამოსული"
-
-        # --- Step 1: Get source data ---
-        data = get_sheet_values(source_sheet)
-        if not data or not isinstance(data, list) or len(data) < 2:
-            print(f"⚠️ No data found or insufficient rows in source sheet")
-            return
-
-        # Ensure each row is a list
-        data = [list(row) for row in data]
-
-        # Create DataFrame safely
         try:
-            df_source = pd.DataFrame(data[1:], columns=data[0])
-        except Exception as df_e:
-            print(f"❌ Failed to construct DataFrame: {df_e}")
-            print("Data preview:", data)
-            return
+            # --- Load sheet values ---
+            data = get_sheet_values("მიმდინარე ")
+            if not data or not isinstance(data, list) or len(data) < 2:
+                print("⚠️ No data or insufficient rows in source sheet")
+                return
 
-        # --- Step 2: Find matching rows ---
-        matching_rows = df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].copy()
-        if matching_rows.empty:
-            print(f"⚠️ No rows found for SO {order_number}")
-            return
+            # Ensure proper row formatting
+            data = [list(row) for row in data]
 
-        # Update location
-        matching_rows['ადგილმდებარეობა'] = "ჩამოვიდა"
+            # Build DataFrame safely
+            try:
+                df_source = pd.DataFrame(data[1:], columns=data[0])
+            except Exception as df_e:
+                print(f"❌ DataFrame construction failed: {df_e}")
+                print("Data preview:", data)
+                return
 
-        # --- Step 3: Append to target sheet ---
-        append_dataframe_to_table(matching_rows, sheet_name=target_sheet)
+            # Ensure SO column exists
+            if "SO" not in df_source.columns:
+                print("❌ Column 'SO' not found in sheet")
+                return
 
-        # --- Step 4: Remove rows from source table ---
-        table_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{source_sheet}/tables"
-        tables_resp = HTTP.get(table_url, headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"})
-        tables_resp.raise_for_status()
-        tables = tables_resp.json().get("value", [])
-        if not tables:
-            print("⚠️ No tables found in source sheet, cannot delete rows safely")
-            return
-        table_name = tables[0]["name"]
+            # --- Filter matching rows ---
+            order_number = str(order_number).strip()
+            matching = df_source[df_source["SO"].astype(str).str.strip() == order_number].copy()
 
-        for idx in sorted(df_source[df_source["SO"].astype(str).str.strip() == str(order_number).strip()].index, reverse=True):
-            url_delete = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/{idx}"
-            resp = HTTP.delete(url_delete, headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"})
-            if resp.status_code not in [200, 204]:
-                print(f"⚠️ Failed to delete table row {idx + 2}: {resp.status_code} - {resp.text}")
-            else:
-                print(f"✅ Deleted table row {idx + 2}")
+            if matching.empty:
+                print(f"⚠️ No rows found for SO = {order_number}")
+                return
 
-        print(f"✅ Successfully processed SO {order_number}")
+            print(f"🔍 Found {len(matching)} rows for SO {order_number}")
+            print(matching)
 
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
+            # --- Append only (no deletion) ---
+            append_dataframe_to_table(matching, sheet_name="ჩამოსული")
+
+            print(f"✅ Successfully appended rows for SO {order_number} to sheet 'ჩამოსული'")
+
+        except Exception as e:
+            print(f"❌ Fatal error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 
@@ -670,7 +656,7 @@ def handle_delivery():
         return "Missing order ID", 400
 
     try:
-        PO_future = POOL.submit(process_shipment, order_num)
+        POOL.submit(process_shipment, order_num)
         return "OK", 200
     except Exception as e:
         
