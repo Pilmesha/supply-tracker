@@ -196,7 +196,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             for item in line_items
         ])
 # ----------- HELPER FUNCS FOR EXCEL -----------
-def get_used_range(sheet_name):
+def get_used_range(sheet_name: str):
     """Get the used range of a worksheet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
@@ -239,7 +239,7 @@ def get_table_columns(table_name):
     return [col["name"] for col in resp.json().get("value", [])]
 
 # ----------- MAIN LOGIC -----------
-def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინარე "):
+def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
@@ -285,7 +285,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name="მიმდინ�
         print("❌ Error response content (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
 
-def get_sheet_values(sheet_name="მიმდინარე "):
+def get_sheet_values(sheet_name: str):
     """Get actual usedRange values (including header row)."""
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/"
@@ -423,7 +423,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
                 else:
                     raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
             else:
-                append_dataframe_to_table(new_df)
+                append_dataframe_to_table(new_df, "მიმდინარე ")
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
@@ -542,7 +542,7 @@ def monday_job():
             for order in orders:
                 if order['type'] == "salesorder":
                     One_Drive_Auth()
-                    append_dataframe_to_table(get_sales_order_df(order['order_id']))
+                    append_dataframe_to_table(get_sales_order_df(order['order_id']), "მიმდინარე ")
                 else:
                     One_Drive_Auth()
                     PO_df = get_purchase_order_df(order['order_id'])
@@ -589,7 +589,7 @@ def process_shipment(order_number: str) -> None:
             print(matching)
 
             # --- Append only (no deletion) ---
-            append_dataframe_to_table(matching, sheet_name="ჩამოსული")
+            append_dataframe_to_table(matching, "ჩამოსული")
 
             print(f"✅ Successfully appended rows for SO {order_number} to sheet 'ჩამოსული'")
 
