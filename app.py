@@ -203,7 +203,7 @@ def get_used_range(sheet_name: str):
     resp = HTTP.get(url, headers=headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
-def create_table_if_not_exists(range_address, has_headers=True, retries=3):
+def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retries=3):
     """Create a new table if none exist yet, retry if workbook is busy"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
@@ -211,8 +211,12 @@ def create_table_if_not_exists(range_address, has_headers=True, retries=3):
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     existing_tables = resp.json().get("value", [])
-    if existing_tables:
-        return existing_tables[0]["name"]  # reuse first table
+    # Check if a table already exists on this sheet
+    for t in existing_tables:
+        if t["worksheet"]["name"] == sheet_name:
+            return t["name"]
+    # if existing_tables:
+    #     return existing_tables[0]["name"]  # reuse first table
 
     # Retry creating table
     url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
@@ -245,7 +249,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
     # Ensure table exists
     range_address = get_used_range(sheet_name)
-    table_name = create_table_if_not_exists(range_address)
+    table_name = create_table_if_not_exists(range_address, sheet_name)
     # Handle Customer/Reference substitution
     if "Customer" in df.columns and "Reference" in df.columns:
         df = df.copy()
@@ -417,7 +421,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
 
                     resp.raise_for_status()
                     range_address = get_sheet_values("მიმდინარე ")
-                    table_name = create_table_if_not_exists(range_address)
+                    table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
                     print(f"✅ Upload successful. Created table named {table_name}")
                     return
                 else:
@@ -537,7 +541,7 @@ def monday_job():
 
                 resp.raise_for_status()
                 range_address = get_used_range("მიმდინარე ")
-                table_name = create_table_if_not_exists(range_address)
+                table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
                 print(f"✅ Cleaned table {table_name}")
             for order in orders:
                 if order['type'] == "salesorder":
@@ -839,7 +843,7 @@ def process_message(mailbox, message_id, message_date):
 
             resp.raise_for_status()
             range_address = get_used_range("მიმდინარე ")
-            table_name = create_table_if_not_exists(range_address)
+            table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
             print(f"✅ Upload successful. Created table named {table_name}")
             file_stream.close()
             file_stream = wb = None
