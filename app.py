@@ -196,7 +196,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             for item in line_items
         ])
 # ----------- HELPER FUNCS FOR EXCEL -----------
-def get_used_range(sheet_name="მიმდინარე "):
+def get_used_range(sheet_name):
     """Get the used range of a worksheet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
