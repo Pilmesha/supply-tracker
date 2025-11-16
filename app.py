@@ -259,7 +259,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
     # Ensure table exists
     range_address = get_used_range(sheet_name)
-    table_name = create_table_if_not_exists(range_address)
+    table_name = create_table_if_not_exists(range_address, sheet_name)
     # Handle Customer/Reference substitution
     if "Customer" in df.columns and "Reference" in df.columns:
         df = df.copy()
@@ -431,7 +431,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
 
                     resp.raise_for_status()
                     range_address = get_sheet_values("მიმდინარე ")
-                    table_name = create_table_if_not_exists(range_address)
+                    table_name = create_table_if_not_exists(range_address,"მიმდინარე ")
                     print(f"✅ Upload successful. Created table named {table_name}")
                     return
                 else:
@@ -551,7 +551,7 @@ def monday_job():
 
                 resp.raise_for_status()
                 range_address = get_used_range("მიმდინარე ")
-                table_name = create_table_if_not_exists(range_address)
+                table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
                 print(f"✅ Cleaned table {table_name}")
             for order in orders:
                 if order['type'] == "salesorder":
@@ -853,7 +853,7 @@ def process_message(mailbox, message_id, message_date):
 
             resp.raise_for_status()
             range_address = get_used_range("მიმდინარე ")
-            table_name = create_table_if_not_exists(range_address)
+            table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
             print(f"✅ Upload successful. Created table named {table_name}")
             file_stream.close()
             file_stream = wb = None
