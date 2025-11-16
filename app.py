@@ -204,36 +204,59 @@ def get_used_range(sheet_name: str):
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
 def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retries=3):
-    """Create a new table if none exist yet, retry if workbook is busy"""
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
+    """
+    Return the table name in the specific sheet.
+    If no tables exist there, create a new table for that sheet only.
+    """
+
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    tables_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
 
-    resp = HTTP.get(url, headers=headers)
+    # Fetch all tables first
+    resp = HTTP.get(tables_url, headers=headers)
     resp.raise_for_status()
-    existing_tables = resp.json().get("value", [])
-    # Check if a table already exists on this sheet
-    for t in existing_tables:
-        if t["worksheet"]["name"] == sheet_name:
-            return t["name"]
-    # if existing_tables:
-    #     return existing_tables[0]["name"]  # reuse first table
 
-    # Retry creating table
-    url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
+    tables = resp.json().get("value", [])
+
+    # --- Step 1: Detect tables that belong to this sheet ---
+    for t in tables:
+        table_name = t["name"]
+
+        # Query its worksheet LOUDLY (reliable)
+        ws_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/"
+            f"workbook/tables/{table_name}/worksheet"
+        )
+        ws_resp = HTTP.get(ws_url, headers=headers)
+
+        # If no worksheet is returned, skip
+        if ws_resp.status_code != 200:
+            continue
+
+        ws_name = ws_resp.json().get("name")
+        if ws_name == sheet_name:
+            return table_name
+
+    # --- Step 2: No table in this sheet → create one ---
+    url_add = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/"
+        f"workbook/tables/add"
+    )
     headers["Content-Type"] = "application/json"
     payload = {"address": range_address, "hasHeaders": has_headers}
 
     for attempt in range(retries):
-        resp = HTTP.post(url_add, headers=headers, json=payload)
-        if resp.status_code in [200, 201]:
-            table = resp.json()
-            print(f"✅ Created table '{table['name']}' at range {range_address}")
-            return table["name"]
-        else:
-            print(f"⚠️ Table creation failed ({resp.status_code}), retrying...")
-            time.sleep(2)
+        r = HTTP.post(url_add, headers=headers, json=payload)
 
-    raise Exception(f"❌ Failed to create table after {retries} retries: {resp.status_code} {resp.text}")
+        if r.status_code in (200, 201):
+            new_table = r.json()
+            print(f"✅ Created table '{new_table['name']}' in sheet '{sheet_name}'")
+            return new_table["name"]
+
+        print(f"⚠️ Failed to create table (try {attempt+1}), retrying...")
+        time.sleep(1)
+
+    raise Exception(f"❌ Could not create table for sheet '{sheet_name}'")
 def get_table_columns(table_name):
     """Fetch column names of an existing Excel table"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
