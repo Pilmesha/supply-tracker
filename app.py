@@ -204,59 +204,46 @@ def get_used_range(sheet_name: str):
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
 def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retries=3):
-    """
-    Return the table name in the specific sheet.
-    If no tables exist there, create a new table for that sheet only.
-    """
-
+    """Return existing table on the *sheet* or create a new one."""
+    
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    tables_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables"
 
-    # Fetch all tables first
-    resp = HTTP.get(tables_url, headers=headers)
+    resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
+    existing_tables = resp.json().get("value", [])
 
-    tables = resp.json().get("value", [])
+    sheet_specific_tables = []
 
-    # --- Step 1: Detect tables that belong to this sheet ---
-    for t in tables:
-        table_name = t["name"]
+    # Filter ONLY tables whose worksheet name matches
+    for t in existing_tables:
+        ws = t.get("worksheet", {})  # prevents KeyError
+        if ws.get("name") == sheet_name:
+            sheet_specific_tables.append(t)
 
-        # Query its worksheet LOUDLY (reliable)
-        ws_url = (
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/"
-            f"workbook/tables/{table_name}/worksheet"
-        )
-        ws_resp = HTTP.get(ws_url, headers=headers)
+    # If any table already exists on that sheet → reuse first one
+    if sheet_specific_tables:
+        return sheet_specific_tables[0]["name"]
 
-        # If no worksheet is returned, skip
-        if ws_resp.status_code != 200:
-            continue
-
-        ws_name = ws_resp.json().get("name")
-        if ws_name == sheet_name:
-            return table_name
-
-    # --- Step 2: No table in this sheet → create one ---
-    url_add = (
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/"
-        f"workbook/tables/add"
-    )
+    # Otherwise create a new table
+    url_add = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
     headers["Content-Type"] = "application/json"
     payload = {"address": range_address, "hasHeaders": has_headers}
 
     for attempt in range(retries):
-        r = HTTP.post(url_add, headers=headers, json=payload)
+        resp = HTTP.post(url_add, headers=headers, json=payload)
+        if resp.status_code in [200, 201]:
+            table = resp.json()
+            print(f"✅ Created table '{table['name']}' at range {range_address}")
+            return table["name"]
+        else:
+            print(f"⚠️ Table creation failed ({resp.status_code}), retrying...")
+            time.sleep(2)
 
-        if r.status_code in (200, 201):
-            new_table = r.json()
-            print(f"✅ Created table '{new_table['name']}' in sheet '{sheet_name}'")
-            return new_table["name"]
-
-        print(f"⚠️ Failed to create table (try {attempt+1}), retrying...")
-        time.sleep(1)
-
-    raise Exception(f"❌ Could not create table for sheet '{sheet_name}'")
+    raise Exception(
+        f"❌ Failed to create table after {retries} retries: "
+        f"{resp.status_code} {resp.text}"
+    )
 def get_table_columns(table_name):
     """Fetch column names of an existing Excel table"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
@@ -272,7 +259,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
     # Ensure table exists
     range_address = get_used_range(sheet_name)
-    table_name = create_table_if_not_exists(range_address, sheet_name)
+    table_name = create_table_if_not_exists(range_address)
     # Handle Customer/Reference substitution
     if "Customer" in df.columns and "Reference" in df.columns:
         df = df.copy()
@@ -444,7 +431,7 @@ def update_excel(new_df: pd.DataFrame) -> None:
 
                     resp.raise_for_status()
                     range_address = get_sheet_values("მიმდინარე ")
-                    table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
+                    table_name = create_table_if_not_exists(range_address)
                     print(f"✅ Upload successful. Created table named {table_name}")
                     return
                 else:
@@ -564,7 +551,7 @@ def monday_job():
 
                 resp.raise_for_status()
                 range_address = get_used_range("მიმდინარე ")
-                table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
+                table_name = create_table_if_not_exists(range_address)
                 print(f"✅ Cleaned table {table_name}")
             for order in orders:
                 if order['type'] == "salesorder":
@@ -866,7 +853,7 @@ def process_message(mailbox, message_id, message_date):
 
             resp.raise_for_status()
             range_address = get_used_range("მიმდინარე ")
-            table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
+            table_name = create_table_if_not_exists(range_address)
             print(f"✅ Upload successful. Created table named {table_name}")
             file_stream.close()
             file_stream = wb = None
