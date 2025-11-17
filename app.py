@@ -251,25 +251,33 @@ def get_table_columns(table_name):
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
-def delete_table_rows(table_name: str, row_indices: list[int]):
+def delete_table_rows(sheet_name: str, row_numbers: list[int]):
     """
-    Delete multiple rows from an Excel table using Microsoft Graph API.
-    row_indices are 0-based table row indices (data rows only).
+    Delete worksheet rows using Graph API, works even for tables.
     """
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+        "Content-Type": "application/json"
+    }
 
-    # Delete bottom → top to avoid shifting
-    for idx in sorted(row_indices, reverse=True):
+    for row in sorted(row_numbers, reverse=True):
+        address = f"{row}:{row}"  # delete whole row
         url = (
             f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}"
-            f"/workbook/tables/{table_name}/rows/{idx}"
+            f"/workbook/worksheets/{sheet_name}/range(address='{address}')/delete"
         )
-        resp = HTTP.delete(url, headers=headers)
 
+        resp = HTTP.post(url, headers=headers, json={"shift": "up"})
         if resp.status_code not in (200, 204):
-            print(f"⚠️ Failed to delete row {idx}: {resp.text}")
+            print(f"⚠️ Failed to delete row {row}: {resp.text}")
         else:
-            print(f"🗑️ Deleted table row index {idx}")
+            print(f"🗑️ Deleted worksheet row {row}")
+def get_table_start_row_from_used_range(sheet_name: str) -> int:
+    used_addr = get_used_range(sheet_name)
+    # Example: "მიმდინარე !A1:Y300"
+    start_cell = used_addr.split("!")[1].split(":")[0]  # "A1"
+    start_row = int(re.findall(r"\d+", start_cell)[0])
+    return start_row
 
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
@@ -610,18 +618,18 @@ def process_shipment(order_number: str) -> None:
                 return
 
             print(f"🔍 Found {len(matching)} rows for SO {order_number}")
-            matching.loc[:, "ადგილმდებარეობა"] = "ჩამოვიდა"
+            matching.loc[:, "ადგილმდებარეობა"] = "ჩაბარდა"
             # --- Append only (no deletion) ---
             append_dataframe_to_table(matching, "ჩამოსული")
 
             print(f"✅ Successfully appended rows for SO {order_number} to sheet 'ჩამოსული'")
+            start_row = get_table_start_row_from_used_range("მიმდინარე ")
             table_row_indices = matching.index.tolist()
-            range_address = get_used_range("მიმდინარე ")
-            table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
-            print(f"🗑️ Rows to delete in table '{table_name}': {table_row_indices}")
+            worksheet_rows = [start_row + 1 + idx for idx in table_row_indices]
+
 
             # --- DELETE FROM THE TABLE ---
-            delete_table_rows(table_name, table_row_indices)
+            delete_table_rows("მიმდინარე ", worksheet_rows)
 
             print(f"✅ Completed processing for SO {order_number}")
 
