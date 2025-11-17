@@ -610,13 +610,14 @@ def process_shipment(order_number: str) -> None:
                 return
 
             print(f"🔍 Found {len(matching)} rows for SO {order_number}")
-
+            matching.loc[:, "ადგილმდებარეობა"] = "ჩამოვიდა"
             # --- Append only (no deletion) ---
             append_dataframe_to_table(matching, "ჩამოსული")
 
             print(f"✅ Successfully appended rows for SO {order_number} to sheet 'ჩამოსული'")
             table_row_indices = matching.index.tolist()
-
+            range_address = get_used_range("მიმდინარე ")
+            table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
             print(f"🗑️ Rows to delete in table '{table_name}': {table_row_indices}")
 
             # --- DELETE FROM THE TABLE ---
