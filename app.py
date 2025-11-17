@@ -251,6 +251,25 @@ def get_table_columns(table_name):
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
+def delete_table_rows(table_name: str, row_indices: list[int]):
+    """
+    Delete multiple rows from an Excel table using Microsoft Graph API.
+    row_indices are 0-based table row indices (data rows only).
+    """
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+
+    # Delete bottom → top to avoid shifting
+    for idx in sorted(row_indices, reverse=True):
+        url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}"
+            f"/workbook/tables/{table_name}/rows/{idx}"
+        )
+        resp = HTTP.delete(url, headers=headers)
+
+        if resp.status_code not in (200, 204):
+            print(f"⚠️ Failed to delete row {idx}: {resp.text}")
+        else:
+            print(f"🗑️ Deleted table row index {idx}")
 
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
@@ -579,33 +598,31 @@ def process_shipment(order_number: str) -> None:
             data = [list(row) for row in data]
 
             # Build DataFrame safely
-            try:
-                df_source = pd.DataFrame(data[1:], columns=data[0])
-            except Exception as df_e:
-                print(f"❌ DataFrame construction failed: {df_e}")
-                print("Data preview:", data)
-                return
-
-            # Ensure SO column exists
-            if "SO" not in df_source.columns:
-                print("❌ Column 'SO' not found in sheet")
-                return
+            df_source = pd.DataFrame(data[1:], columns=data[0])
 
             # --- Filter matching rows ---
             order_number = str(order_number).strip()
             matching = df_source[df_source["SO"].astype(str).str.strip() == order_number].copy()
+
 
             if matching.empty:
                 print(f"⚠️ No rows found for SO = {order_number}")
                 return
 
             print(f"🔍 Found {len(matching)} rows for SO {order_number}")
-            print(matching)
 
             # --- Append only (no deletion) ---
             append_dataframe_to_table(matching, "ჩამოსული")
 
             print(f"✅ Successfully appended rows for SO {order_number} to sheet 'ჩამოსული'")
+            table_row_indices = matching.index.tolist()
+
+            print(f"🗑️ Rows to delete in table '{table_name}': {table_row_indices}")
+
+            # --- DELETE FROM THE TABLE ---
+            delete_table_rows(table_name, table_row_indices)
+
+            print(f"✅ Completed processing for SO {order_number}")
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
