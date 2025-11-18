@@ -282,6 +282,7 @@ def get_table_start_row_from_used_range(sheet_name: str) -> int:
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
+    df = df[df['Supplier Company'] != 'HACH']
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
     # Ensure table exists
