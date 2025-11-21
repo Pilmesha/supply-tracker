@@ -647,7 +647,7 @@ def process_hach(df: pd.DataFrame) -> None:
     # Extract PO number and define sheet
     # ------------------------------------------------------------
     po_full = df["PO"].iloc[0]
-    po_number = po_full.replace("PO-", "")
+    po_number = po_full.replace("PO-00", "")
     sheet_name = po_number
 
     print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
@@ -666,8 +666,8 @@ def process_hach(df: pd.DataFrame) -> None:
     # ------------------------------------------------------------
     info_data = [
         ["PO", po_number],
-        ["SO", "Dummy reference"],
-        ["POს გაკეთების თარიღი", "Dummy date"],
+        ["SO", df["Reference"].iloc[0]],
+        ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
         ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
 
@@ -676,15 +676,17 @@ def process_hach(df: pd.DataFrame) -> None:
     response = HTTP.patch(url, headers=headers, json={"values": info_data})
     response.raise_for_status()
 
-    # Optional: add borders to C3:D6
-    borders_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format/borders"
-    border_payload = {
-        "index": "EdgeBottom",
-        "style": "Continuous",
-        "color": {"rgb": "000000"}
-    }
-    HTTP.post(borders_url, headers=headers, json=border_payload)
-    # Repeat for EdgeTop, EdgeLeft, EdgeRight if needed
+    edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"]
+    for edge in edges:
+        borders_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+            f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/{edge}"
+        )
+        border_payload = {
+            "style": "Continuous",
+            "color": {"rgb": "000000"}  # black border
+        }
+        HTTP.patch(borders_url, headers=headers, json=border_payload)
 
     # ------------------------------------------------------------
     # 3) WRITE AND CREATE TABLE BELOW (start row 8)
