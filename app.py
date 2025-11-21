@@ -668,9 +668,6 @@ def process_hach(df: pd.DataFrame) -> None:
 
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-    # ------------------------------------------------------------
-    # 1) CREATE NEW SHEET
-    # ------------------------------------------------------------
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     response = HTTP.post(url, headers=headers, json={"name": sheet_name})
     response.raise_for_status()
@@ -699,9 +696,6 @@ def process_hach(df: pd.DataFrame) -> None:
         }
         HTTP.patch(borders_url, headers=headers, json=border_payload)
 
-    # ------------------------------------------------------------
-    # 3) WRITE AND CREATE TABLE BELOW (start row 8)
-    # ------------------------------------------------------------
     start_row = 8
     table_headers = [
         "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
@@ -730,6 +724,8 @@ def process_hach(df: pd.DataFrame) -> None:
     response.raise_for_status()
     table_id = response.json()["id"]
     normalized_df = normalize_hach(df)
+    print("Df normalized")
+    print(normalized_df)
     rows_to_append = normalized_df.values.tolist()
 
     # add rows into table
