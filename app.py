@@ -640,34 +640,10 @@ def process_shipment(order_number: str) -> None:
             print(f"❌ Fatal error: {e}")
             import traceback
             traceback.print_exc()
-def graph_debug_request(method, url, headers=None, json=None):
-    """Send request with full debugging output."""
-    print("\n------------------------------")
-    print(f"REQUEST: {method} {url}")
-    print("HEADERS:", headers)
-    if json:
-        print("JSON:", json)
-    print("------------------------------")
 
-    if method == "GET":
-        r = HTTP.get(url, headers=headers)
-    elif method == "POST":
-        r = HTTP.post(url, headers=headers, json=json)
-    elif method == "PATCH":
-        r = HTTP.patch(url, headers=headers, json=json)
-    else:
-        raise ValueError("Unsupported method")
-
-    print("STATUS:", r.status_code)
-    try:
-        print("RESPONSE JSON:", r.json())
-    except:
-        print("RESPONSE TEXT:", r.text)
-
-    print("------------------------------\n")
-    r.raise_for_status()
-    return r
 def process_hach(df: pd.DataFrame) -> None:
+    print("in the hach func")
+    print(df)
     supplier_company = df["Supplier Company"].iloc[0]
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-", "")
@@ -675,7 +651,9 @@ def process_hach(df: pd.DataFrame) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     data = {"name": sheet_name}
-    graph_debug_request("POST", url, headers, data)
+
+    response = HTTP.post(url, headers=headers, json=data)
+    response.raise_for_status()
     table1_data = [
         ["PO", po_number],
         ["SO", "Dummy reference"],
@@ -683,39 +661,54 @@ def process_hach(df: pd.DataFrame) -> None:
         ["დღვანდელი თარიღი", "Datetime.now()"]
     ]
     # Write data to C3:D6
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/range(address='C3:D6')"
-    graph_debug_request("PATCH", url, headers, {"values": table1_data})
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')"
+    response = HTTP.patch(url, headers=headers, json={"values": table1_data})
+    response.raise_for_status()
     # Convert A1:B2 to a table
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
     table1_payload = {
         "address": f"{sheet_name}!C3:D6",
         "hasHeaders": True
     }
-    graph_debug_request("POST", url, headers, payload)
+    response = HTTP.post(url, headers=headers, json=table1_payload)
+    response.raise_for_status()
 
-    # 3. Create table #2 below table #1
-    # Compute start row for second table:
-    # Table1 has 2 rows → next row = 3
     # -----------------------
     start_row = 8
     table2_data = [
         ["Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY", "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List", "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი", "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"],
-        ["", "","", "","", "","", "","", "","", "","", "","", "","", "",""]
+        [""] * 19
     ]
+    col_end = "S"
 
-    # Write second table into A3:B4
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/range(address='A{0}:B{1}')".format(start_row, start_row+1)
-    graph_debug_request("PATCH", url, headers, {"values": table2_data})
+    # Write table2
+    url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/"
+        f"worksheets/{sheet_name}/range(address='A{start_row}:{col_end}{start_row+1}')"
+    )
 
-    # Convert A3:B4 to a second table
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
+    print(f"\n📌 Writing Table2 A{start_row}:{col_end}{start_row+1}")
+    print("Values:", table2_data)
+    response = HTTP.patch(url, headers=headers, json={"values": table2_data})
+    print("STATUS:", response.status_code)
+    print("BODY:", response.text)
+    response.raise_for_status()
+
+    # Convert to table2
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
     table2_payload = {
-        "address": f"{sheet_name}!A{start_row}:B{start_row+1}",
+        "address": f"{sheet_name}!A{start_row}:{col_end}{start_row+1}",
         "hasHeaders": True
     }
-    graph_debug_request("POST", url, headers, payload)
 
-    return "HACH workflow completed"
+    print("\n📌 Creating Table2")
+    response = HTTP.post(url, headers=headers, json=table2_payload)
+    print("STATUS:", response.status_code)
+    print("BODY:", response.text)
+    response.raise_for_status()
+
+
+    print("\n✅ HACH workflow completed successfully")
 
 @app.route("/")
 def index():
