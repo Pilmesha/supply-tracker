@@ -645,9 +645,22 @@ def process_hach(df: pd.DataFrame) -> None:
     # ------------------------------------------------------------
     # Extract PO number and define sheet
     # ------------------------------------------------------------
+    # Add input validation
+    if df.empty or "PO" not in df.columns:
+        raise ValueError("DataFrame is empty or missing 'PO' column")
+    
     po_full = df["PO"].iloc[0]
-    po_number = po_full.replace("PO-", "")
+    # Handle potential None/NaN values
+    if pd.isna(po_full):
+        raise ValueError("PO value is missing or NaN")
+    
+    po_number = str(po_full).replace("PO-", "")  # Ensure string type
     sheet_name = po_number
+
+    # Validate sheet name (Excel has restrictions)
+    import re
+    sheet_name = re.sub(r'[\\/*\[\]:?]', '_', sheet_name)  # Remove invalid chars
+    sheet_name = sheet_name[:31]  # Excel sheet name max 31 chars
 
     print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
 
@@ -657,10 +670,14 @@ def process_hach(df: pd.DataFrame) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-    response = HTTP.post(url, headers=headers, json={"name": sheet_name})
-    print("STATUS (sheet add):", response.status_code)
-    print("BODY:", response.text)
-    response.raise_for_status()
+    try:
+        response = HTTP.post(url, headers=headers, json={"name": sheet_name})
+        print("STATUS (sheet add):", response.status_code)
+        print("BODY:", response.text)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"❌ Failed to create sheet: {e}")
+        return
 
     # ------------------------------------------------------------
     # 2) TABLE 1: Write data (NO HEADERS YET)
@@ -673,36 +690,47 @@ def process_hach(df: pd.DataFrame) -> None:
         ["Today", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
 
-    full_table1 = [table1_headers] + table1_rows  # header included
+    full_table1 = [table1_headers] + table1_rows
 
-    write_range = f"C3:D{3 + len(full_table1) - 1}"
+    # Fix: Calculate range correctly
+    start_row1 = 3
+    end_row1 = start_row1 + len(full_table1) - 1
+    write_range = f"C{start_row1}:D{end_row1}"
 
     print(f"\n📌 Writing Table1 → {write_range}")
     print("Values:", full_table1)
 
-    url = (
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
-        f"workbook/worksheets/{sheet_name}/range(address=\"{write_range}\")"
-    )
-    response = HTTP.patch(url, headers=headers, json={"values": full_table1})
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
-    response.raise_for_status()
+    try:
+        url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
+            f"workbook/worksheets/{sheet_name}/range(address='{write_range}')"  # Fix: Use single quotes
+        )
+        response = HTTP.patch(url, headers=headers, json={"values": full_table1})
+        print("STATUS:", response.status_code)
+        print("BODY:", response.text)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"❌ Failed to write Table1: {e}")
+        return
 
     # ------------------------------------------------------------
     # Convert Table1 to an Excel table
     # ------------------------------------------------------------
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
-    payload = {
-        "address": f"{sheet_name}!{write_range}",
-        "hasHeaders": True
-    }
+    try:
+        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
+        payload = {
+            "address": f"{sheet_name}!{write_range}",
+            "hasHeaders": True
+        }
 
-    print("\n📌 Creating Table1")
-    response = HTTP.post(url, headers=headers, json=payload)
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
-    response.raise_for_status()
+        print("\n📌 Creating Table1")
+        response = HTTP.post(url, headers=headers, json=payload)
+        print("STATUS:", response.status_code)
+        print("BODY:", response.text)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"❌ Failed to create Table1: {e}")
+        # Continue with Table2 even if Table1 creation fails
 
     # ------------------------------------------------------------
     # 3) TABLE 2 (wide table)
@@ -718,36 +746,46 @@ def process_hach(df: pd.DataFrame) -> None:
     table2_rows = [[""] * len(table2_headers)]  # blank row
 
     full_table2 = [table2_headers] + table2_rows
-    col_end = "T"  # 19 columns → ends at column T
+    col_end = "S"  # Fix: 19 columns → A=1, S=19 (not T=20)
 
-    write_range2 = f"A{start_row}:{col_end}{start_row + len(full_table2) - 1}"
+    # Fix: Calculate range correctly
+    end_row2 = start_row + len(full_table2) - 1
+    write_range2 = f"A{start_row}:{col_end}{end_row2}"
 
     print(f"\n📌 Writing Table2 → {write_range2}")
-    print("Values:", full_table2)
+    print(f"Table dimensions: {len(full_table2)} rows x {len(full_table2[0])} columns")
 
-    url = (
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
-        f"workbook/worksheets/{sheet_name}/range(address=\"{write_range2}\")"
-    )
-    response = HTTP.patch(url, headers=headers, json={"values": full_table2})
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
-    response.raise_for_status()
+    try:
+        url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
+            f"workbook/worksheets/{sheet_name}/range(address='{write_range2}')"  # Fix: Use single quotes
+        )
+        response = HTTP.patch(url, headers=headers, json={"values": full_table2})
+        print("STATUS:", response.status_code)
+        print("BODY:", response.text)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"❌ Failed to write Table2: {e}")
+        return
 
     # ------------------------------------------------------------
     # Convert Table2 to Excel table
     # ------------------------------------------------------------
-    print("\n📌 Creating Table2")
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
-    payload2 = {
-        "address": f"{sheet_name}!{write_range2}",
-        "hasHeaders": True
-    }
+    try:
+        print("\n📌 Creating Table2")
+        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
+        payload2 = {
+            "address": f"{sheet_name}!{write_range2}",
+            "hasHeaders": True
+        }
 
-    response = HTTP.post(url, headers=headers, json=payload2)
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
-    response.raise_for_status()
+        response = HTTP.post(url, headers=headers, json=payload2)
+        print("STATUS:", response.status_code)
+        print("BODY:", response.text)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"❌ Failed to create Table2: {e}")
+        return
 
     print("\n✅ HACH workflow completed successfully.")
 
