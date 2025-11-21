@@ -39,6 +39,7 @@ CLIENT_SECRET_DRIVE = os.getenv('CLIENT_SECRET_DRIVE')
 DRIVE_ID = os.getenv('DRIVE_ID')
 FILE_ID = os.getenv('FILE_ID')
 PERMS_ID = os.getenv('PERMS_ID')
+HACH_FILE = os.getenv('HACH_FILE')
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN_EXPIRY = datetime.utcnow()
 ACCESS_TOKEN = None
