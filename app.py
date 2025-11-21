@@ -687,7 +687,7 @@ def process_hach(df: pd.DataFrame) -> None:
 
         # Expected remaining columns → normalize
         expected = ["Details", "Code", "QTY", "Customer"]
-        df_processed = df_processed[expected]
+        df_processed.columns = df_processed[expected]
 
         # Convert everything to string to avoid Graph errors
         df_processed = df_processed.astype(str)
@@ -705,8 +705,8 @@ def process_hach(df: pd.DataFrame) -> None:
 
         col_map = {
             "Code": "Code",
-            "Details": "Item",
-            "QTY": "Qშეკვეთილი რაოდენობა",
+            "Details": "Details",
+            "QTY": "QTY",
             "Customer": "Customer"
         }
 
