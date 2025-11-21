@@ -642,8 +642,6 @@ def process_shipment(order_number: str) -> None:
             traceback.print_exc()
 
 def process_hach(df: pd.DataFrame) -> None:
-    print("in the hach func")
-    print(df)
     supplier_company = df["Supplier Company"].iloc[0]
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-", "")
@@ -651,7 +649,7 @@ def process_hach(df: pd.DataFrame) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     data = {"name": sheet_name}
-
+    print("Added sheet")
     response = HTTP.post(url, headers=headers, json=data)
     response.raise_for_status()
     table1_data = [
@@ -664,6 +662,7 @@ def process_hach(df: pd.DataFrame) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')"
     response = HTTP.patch(url, headers=headers, json={"values": table1_data})
     response.raise_for_status()
+    print("Data for table 1")
     # Convert A1:B2 to a table
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
     table1_payload = {
@@ -672,14 +671,14 @@ def process_hach(df: pd.DataFrame) -> None:
     }
     response = HTTP.post(url, headers=headers, json=table1_payload)
     response.raise_for_status()
-
+    print("Created table 1")
     # -----------------------
     start_row = 8
     table2_data = [
         ["Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY", "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List", "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი", "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"],
         [""] * 19
     ]
-    col_end = "S"
+    col_end = "T"
 
     # Write table2
     url = (
