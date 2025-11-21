@@ -705,8 +705,8 @@ def process_hach(df: pd.DataFrame) -> None:
 
         col_map = {
             "Code": "Code",
-            "Details": "Details",
-            "QTY": "QTY",
+            "Details": "Item",
+            "QTY": "Qშეკვეთილი რაოდენობა",
             "Customer": "Customer"
         }
 
