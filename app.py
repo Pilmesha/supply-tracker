@@ -661,13 +661,9 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     
 
 def process_hach(df: pd.DataFrame) -> None:
-    # ------------------------------------------------------------
-    # Extract PO number and define sheet
-    # ------------------------------------------------------------
     po_full = df["PO"].iloc[0]
-    po_number = po_full.replace("PO-", "")
+    po_number = po_full.replace("PO-00", "")
     sheet_name = po_number
-
     print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
 
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
@@ -681,8 +677,8 @@ def process_hach(df: pd.DataFrame) -> None:
 
     info_data = [
         ["PO", po_number],
-        ["SO", "Dummy reference"],
-        ["POს გაკეთების თარიღი", "Dummy date"],
+        ["SO", df["Reference"].iloc[0]],
+        ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
         ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
 
@@ -732,7 +728,18 @@ def process_hach(df: pd.DataFrame) -> None:
     }
     response = HTTP.post(url, headers=headers, json=payload)
     response.raise_for_status()
-    print(normalize_hach(df))
+    table_id = response.json()["id"]
+    normalized_df = normalize_hach(df)
+    rows_to_append = normalized_df.values.tolist()
+
+    # add rows into table
+    rows_url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+        f"/workbook/tables/{table_id}/rows/add"
+    )
+
+    response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
+    response.raise_for_status()
 
     print("\n✅ HACH workflow completed successfully.")
 
