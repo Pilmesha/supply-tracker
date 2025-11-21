@@ -642,72 +642,114 @@ def process_shipment(order_number: str) -> None:
             traceback.print_exc()
 
 def process_hach(df: pd.DataFrame) -> None:
-    supplier_company = df["Supplier Company"].iloc[0]
+    # ------------------------------------------------------------
+    # Extract PO number and define sheet
+    # ------------------------------------------------------------
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-", "")
     sheet_name = po_number
+
+    print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
+
+    # ------------------------------------------------------------
+    # 1) CREATE NEW SHEET
+    # ------------------------------------------------------------
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    data = {"name": sheet_name}
-    print("Added sheet")
-    response = HTTP.post(url, headers=headers, json=data)
+
+    response = HTTP.post(url, headers=headers, json={"name": sheet_name})
+    print("STATUS (sheet add):", response.status_code)
+    print("BODY:", response.text)
     response.raise_for_status()
-    table1_data = [
+
+    # ------------------------------------------------------------
+    # 2) TABLE 1: Write data (NO HEADERS YET)
+    # ------------------------------------------------------------
+    table1_headers = ["Field", "Value"]
+    table1_rows = [
         ["PO", po_number],
         ["SO", "Dummy reference"],
-        ["POს გაკეთების თარიღი", "Dummy date"],
-        ["დღვანდელი თარიღი", "Datetime.now()"]
+        ["PO Created", "2025-01-01"],
+        ["Today", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
-    # Write data to C3:D6
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')"
-    response = HTTP.patch(url, headers=headers, json={"values": table1_data})
-    response.raise_for_status()
-    print("Data for table 1")
-    # Convert A1:B2 to a table
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
-    table1_payload = {
-        "address": f"{sheet_name}!C3:D6",
-        "hasHeaders": True
-    }
-    response = HTTP.post(url, headers=headers, json=table1_payload)
-    response.raise_for_status()
-    print("Created table 1")
-    # -----------------------
-    start_row = 8
-    table2_data = [
-        ["Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY", "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List", "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი", "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"],
-        [""] * 19
-    ]
-    col_end = "T"
 
-    # Write table2
+    full_table1 = [table1_headers] + table1_rows  # header included
+
+    write_range = f"C3:D{3 + len(full_table1) - 1}"
+
+    print(f"\n📌 Writing Table1 → {write_range}")
+    print("Values:", full_table1)
+
     url = (
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/"
-        f"worksheets/{sheet_name}/range(address='A{start_row}:{col_end}{start_row+1}')"
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
+        f"workbook/worksheets/{sheet_name}/range(address=\"{write_range}\")"
     )
-
-    print(f"\n📌 Writing Table2 A{start_row}:{col_end}{start_row+1}")
-    print("Values:", table2_data)
-    response = HTTP.patch(url, headers=headers, json={"values": table2_data})
+    response = HTTP.patch(url, headers=headers, json={"values": full_table1})
     print("STATUS:", response.status_code)
     print("BODY:", response.text)
     response.raise_for_status()
 
-    # Convert to table2
+    # ------------------------------------------------------------
+    # Convert Table1 to an Excel table
+    # ------------------------------------------------------------
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
-    table2_payload = {
-        "address": f"{sheet_name}!A{start_row}:{col_end}{start_row+1}",
+    payload = {
+        "address": f"{sheet_name}!{write_range}",
         "hasHeaders": True
     }
 
-    print("\n📌 Creating Table2")
-    response = HTTP.post(url, headers=headers, json=table2_payload)
+    print("\n📌 Creating Table1")
+    response = HTTP.post(url, headers=headers, json=payload)
     print("STATUS:", response.status_code)
     print("BODY:", response.text)
     response.raise_for_status()
 
+    # ------------------------------------------------------------
+    # 3) TABLE 2 (wide table)
+    # ------------------------------------------------------------
+    start_row = 8
+    table2_headers = [
+        "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
+        "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
+        "Packing List Sent Date", "Qty Sent", "ETA", "Arrival Date",
+        "Qty Delivered", "Customer", "Export?", "Location", "Notes"
+    ]
 
-    print("\n✅ HACH workflow completed successfully")
+    table2_rows = [[""] * len(table2_headers)]  # blank row
+
+    full_table2 = [table2_headers] + table2_rows
+    col_end = "T"  # 19 columns → ends at column T
+
+    write_range2 = f"A{start_row}:{col_end}{start_row + len(full_table2) - 1}"
+
+    print(f"\n📌 Writing Table2 → {write_range2}")
+    print("Values:", full_table2)
+
+    url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
+        f"workbook/worksheets/{sheet_name}/range(address=\"{write_range2}\")"
+    )
+    response = HTTP.patch(url, headers=headers, json={"values": full_table2})
+    print("STATUS:", response.status_code)
+    print("BODY:", response.text)
+    response.raise_for_status()
+
+    # ------------------------------------------------------------
+    # Convert Table2 to Excel table
+    # ------------------------------------------------------------
+    print("\n📌 Creating Table2")
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
+    payload2 = {
+        "address": f"{sheet_name}!{write_range2}",
+        "hasHeaders": True
+    }
+
+    response = HTTP.post(url, headers=headers, json=payload2)
+    print("STATUS:", response.status_code)
+    print("BODY:", response.text)
+    response.raise_for_status()
+
+    print("\n✅ HACH workflow completed successfully.")
 
 @app.route("/")
 def index():
