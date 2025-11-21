@@ -740,23 +740,6 @@ def process_hach(df: pd.DataFrame) -> None:
 
     response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
     response.raise_for_status()
-    # Compute approximate column widths
-    col_widths = {}
-    for col in normalized_df.columns:
-        max_len = max(normalized_df[col].astype(str).apply(len).max(), len(col))
-        # adjust factor to match Excel width scaling
-        col_widths[col] = max_len + 2
-
-    # Set widths via Graph API
-    for idx, col_name in enumerate(normalized_df.columns, start=2):  # Excel columns B, C, ... since start_col = B
-        # Convert idx to Excel letter (B=2 -> 'B', C=3 -> 'C', etc.)
-        col_letter = chr(64 + idx) if idx <= 26 else chr(64 + (idx-1)//26) + chr(64 + idx%26)
-        width_url = (
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-            f"/workbook/worksheets/{sheet_name}/range(address='{col_letter}{start_row}:{col_letter}{start_row + len(normalized_df)}')/columnwidth"
-        )
-        HTTP.patch(width_url, headers=headers, json={"width": col_widths[col_name]})
-
     print("\n✅ HACH workflow completed successfully.")
 
 
