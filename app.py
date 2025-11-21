@@ -659,8 +659,6 @@ def process_hach(df: pd.DataFrame) -> None:
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
     response = HTTP.post(url, headers=headers, json={"name": sheet_name})
-    print("STATUS (sheet add):", response.status_code)
-    print("BODY:", response.text)
     response.raise_for_status()
 
     # ------------------------------------------------------------
@@ -673,33 +671,18 @@ def process_hach(df: pd.DataFrame) -> None:
         ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
 
-    write_range = "C3:D6"
-
-    print(f"\n📌 Writing Table1 (NO HEADERS) → {write_range}")
-    print("Values:", table1_data)
-
-    url = (
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
-        f"workbook/worksheets/{sheet_name}/range(address={write_range})"
-    )
-
+    # Write data to C3:D6
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')"
     response = HTTP.patch(url, headers=headers, json={"values": table1_data})
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
     response.raise_for_status()
 
-    # Convert Table1 to Excel Table
-    print("\n📌 Creating Table1 (no headers)")
-
+    # Convert C3:D6 to a table
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
     table1_payload = {
-        "address": f"{sheet_name}!{write_range}",
+        "address": f"{sheet_name}!C3:D6",
         "hasHeaders": False
     }
-
     response = HTTP.post(url, headers=headers, json=table1_payload)
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
     response.raise_for_status()
 
     # ------------------------------------------------------------
@@ -725,7 +708,7 @@ def process_hach(df: pd.DataFrame) -> None:
 
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
-        f"workbook/worksheets/{sheet_name}/range(address={write_range2})"
+        f"workbook/worksheets/{sheet_name}/range(address='{write_range2}')"
     )
     response = HTTP.patch(url, headers=headers, json={"values": full_table2})
     print("STATUS:", response.status_code)
