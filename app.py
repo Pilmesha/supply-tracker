@@ -680,7 +680,7 @@ def process_hach(df: pd.DataFrame) -> None:
 
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
-        f"workbook/worksheets/{sheet_name}/range(address=\"{write_range}\")"
+        f"workbook/worksheets/{sheet_name}/range(address={write_range})"
     )
 
     response = HTTP.patch(url, headers=headers, json={"values": table1_data})
@@ -725,7 +725,7 @@ def process_hach(df: pd.DataFrame) -> None:
 
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/"
-        f"workbook/worksheets/{sheet_name}/range(address=\"{write_range2}\")"
+        f"workbook/worksheets/{sheet_name}/range(address={write_range2})"
     )
     response = HTTP.patch(url, headers=headers, json={"values": full_table2})
     print("STATUS:", response.status_code)
