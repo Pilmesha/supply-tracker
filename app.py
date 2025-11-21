@@ -643,33 +643,22 @@ def process_shipment(order_number: str) -> None:
             traceback.print_exc()
 
 def process_hach(df: pd.DataFrame) -> None:
-    # ------------------------------------------------------------
-    # Extract PO number and define sheet
-    # ------------------------------------------------------------
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-00", "")
     sheet_name = po_number
-
     print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
-
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-
-    # ------------------------------------------------------------
-    # 1) CREATE NEW SHEET
-    # ------------------------------------------------------------
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     response = HTTP.post(url, headers=headers, json={"name": sheet_name})
     response.raise_for_status()
-
-    # ------------------------------------------------------------
-    # 2) WRITE INFO IN C3:D6 (no table, just bordered)
-    # ------------------------------------------------------------
     info_data = [
         ["PO", po_number],
         ["SO", df["Reference"].iloc[0]],
         ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
         ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
+    df = df.drop(["Supplier Company", "PO", "შეკვეთის გაკეთების თარიღი", "Reference"], axis=1)
+    df.columns = ['Details', 'Code', 'QTY', 'Customer']
 
     info_range = "C3:D6"
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
@@ -687,19 +676,51 @@ def process_hach(df: pd.DataFrame) -> None:
             "color": {"rgb": "000000"}  # black border
         }
         HTTP.patch(borders_url, headers=headers, json=border_payload)
-
-    # ------------------------------------------------------------
-    # 3) WRITE AND CREATE TABLE BELOW (start row 8)
-    # ------------------------------------------------------------
     start_row = 8
     table_headers = [
         "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
         "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-        "Packing List Sent Date", "Qty Sent", "ETA", "Arrival Date",
-        "Qty Delivered", "Customer", "Export?", "Location", "Notes"
+        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+        "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
 
-    table_rows = [[""] * len(table_headers)]
+    col_map = {
+        "Item": "",
+        "წერილი": "",
+        "Code": None,
+        "HS Code": "",
+        "Details": None,
+        "თარგმანი": "",
+        "QTY": None,
+        "მიწოდების ვადა": "",
+        "Confirmation 1 (shipment week)": "",
+        "Packing List": "",
+        "რა რიცხვში გამოგზავნეს Packing List-ი": "",
+        "რამდენი გამოიგზავნა": "",
+        "ჩამოსვლის სავარაუდო თარიღი": "",
+        "რეალური ჩამოსვლის თარიღი": "",
+        "Qty Delivered": "",
+        "Customer": None,
+        "Export?": "",
+        "მდებარეობა": "",
+        "შენიშვნა": ""
+    }
+
+    table_rows = []
+    item_counter = 1
+
+    for _, row in df.iterrows():
+        new_row = []
+        for header in table_headers:
+            if header == "Item":
+                new_row.append(item_counter)
+            elif col_map[header] is None:
+                new_row.append(row[header])
+            else:
+                new_row.append(col_map[header])
+        table_rows.append(new_row)
+        item_counter += 1
+
     full_table = [table_headers] + table_rows
     col_end = "T"  # 19 columns → ends at column T
     write_range = f"B{start_row}:{col_end}{start_row + len(full_table) - 1}"
