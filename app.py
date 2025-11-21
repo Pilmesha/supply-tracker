@@ -642,6 +642,8 @@ def process_shipment(order_number: str) -> None:
             traceback.print_exc()
 
 def process_hach(df: pd.DataFrame) -> None:
+    print("in the hach func")
+    print(df)
     supplier_company = df["Supplier Company"].iloc[0]
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-", "")
@@ -665,7 +667,7 @@ def process_hach(df: pd.DataFrame) -> None:
     # Convert A1:B2 to a table
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
     table1_payload = {
-        "address": f"{sheet_name}!A1:B2",
+        "address": f"{sheet_name}!C3:D6",
         "hasHeaders": True
     }
     response = HTTP.post(url, headers=headers, json=table1_payload)
