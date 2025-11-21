@@ -181,7 +181,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         reference = reference.strip("()").strip().rstrip(",")
     supplier_company = purchaseorder.get("vendor_name")
     line_items = purchaseorder.get("line_items", [])
-    return pd.DataFrame([
+    df = pd.DataFrame([
             {
                 "Supplier Company": supplier_company,
                 "PO": po_number,
@@ -195,6 +195,10 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             }
             for item in line_items
         ])
+    if supplier_company == "HACH":
+        process_hach(df)
+        return None
+    return df
 # ----------- HELPER FUNCS FOR EXCEL -----------
 def get_used_range(sheet_name: str):
     """Get the used range of a worksheet"""
@@ -637,8 +641,61 @@ def process_shipment(order_number: str) -> None:
             import traceback
             traceback.print_exc()
 
+def process_hach(df: pd.DataFrame) -> None:
+    supplier_company = df["Supplier Company"].iloc[0]
+    po_full = df["PO"].iloc[0]
+    po_number = po_full.replace("PO-", "")
+    sheet_name = po_number
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    data = {"name": sheet_name}
 
+    response = HTTP.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    table1_data = [
+        ["PO", po_number],
+        ["SO", "Dummy reference"],
+        ["POს გაკეთების თარიღი", "Dummy date"],
+        ["დღვანდელი თარიღი", "Datetime.now()"]
+    ]
+    # Write data to C3:D6
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/range(address='C3:D6')"
+    response = HTTP.patch(url, headers=headers, json={"values": table1_data})
+    response.raise_for_status()
+    # Convert A1:B2 to a table
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
+    table1_payload = {
+        "address": f"{sheet_name}!A1:B2",
+        "hasHeaders": True
+    }
+    response = HTTP.post(url, headers=headers, json=table1_payload)
+    response.raise_for_status()
 
+    # 3. Create table #2 below table #1
+    # Compute start row for second table:
+    # Table1 has 2 rows → next row = 3
+    # -----------------------
+    start_row = 8
+    table2_data = [
+        ["Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY", "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List", "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი", "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"],
+        ["", "","", "","", "","", "","", "","", "","", "","", "","", "",""]
+    ]
+
+    # Write second table into A3:B4
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/range(address='A{0}:B{1}')".format(start_row, start_row+1)
+    response = HTTP.patch(url, headers=headers, json={"values": table2_data})
+    response.raise_for_status()
+
+    # Convert A3:B4 to a second table
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
+    table2_payload = {
+        "address": f"{sheet_name}!A{start_row}:B{start_row+1}",
+        "hasHeaders": True
+    }
+    response = HTTP.post(url, headers=headers, json=table2_payload)
+    response.raise_for_status()
+
+    return "HACH workflow completed"
 
 @app.route("/")
 def index():
