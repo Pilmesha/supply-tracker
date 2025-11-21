@@ -644,98 +644,116 @@ def process_shipment(order_number: str) -> None:
 def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     table_cols = [
         "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
-        "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+        "მიწოდების വადა", "Confirmation 1 (shipment week)", "Packing List",
+        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+        "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
-    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']]
-    df = df.rename({"Item" : "Details", "შეკვეთილი რაოდენობა" : "QTY"}, axis=1)
+    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']].copy()
+    df = df.rename({"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"}, axis=1)
     df["Item"] = df.index + 1
-    new_df = df.copy()
+    # Create missing cols
     for col in table_cols:
-        if col not in new_df.columns:
-            new_df[col] = ""
-    new_df['#'] = range(1, len(new_df) + 1)
-
-    return new_df[table_cols]
+        if col not in df.columns:
+            df[col] = ""
+    df = df[table_cols]
+    df = df.fillna("")
+    return df
     
+def graph_request(method, url, max_retries=5, retry_delay=0.4, **kwargs):
+    timeout = kwargs.pop("timeout", 30)
+    func = getattr(HTTP, method.lower())
 
+    for attempt in range(max_retries):
+        try:
+            response = func(url, timeout=timeout, **kwargs)
+
+            # If Graph returns 429 throttle → retry
+            if response.status_code == 429:
+                time.sleep(1.0)
+                continue
+
+            # Retry on server-side Graph failures
+            if 500 <= response.status_code < 600:
+                time.sleep(retry_delay)
+                continue
+
+            # Raise on 4xx (but let 409 be retried)
+            if response.status_code == 409:
+                time.sleep(retry_delay)
+                continue
+
+            response.raise_for_status()
+            return response
+
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(retry_delay)
+
+    # If all retries fail (should rarely happen)
+    raise RuntimeError(
+        f"Graph API failed after {max_retries} retries: {method} {url}"
+    )
 def process_hach(df: pd.DataFrame) -> None:
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-00", "")
     sheet_name = po_number
     print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
-
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-
+    # Create sheet with retry
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
-    response = HTTP.post(url, headers=headers, json={"name": sheet_name})
-    response.raise_for_status()
-
+    response = graph_request("POST", url, headers, json={"name": sheet_name})
+    # Allow Graph to "settle"
+    time.sleep(0.4)
+    # Write info block
     info_data = [
         ["PO", po_number],
         ["SO", df["Reference"].iloc[0]],
-        ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
+        ["POს გაკეთების თარიღი", str(df["შეკვეთის გაკეთების თარიღი"].iloc[0])],
         ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
-
     info_range = "C3:D6"
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
-    response = HTTP.patch(url, headers=headers, json={"values": info_data})
-    response.raise_for_status()
-
+    graph_request("PATCH", url, headers, json={"values": info_data})
+    # Draw borders
     edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"]
     for edge in edges:
         borders_url = (
             f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
             f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/{edge}"
         )
-        border_payload = {
-            "style": "Continuous",
-            "color": {"rgb": "000000"}  # black border
-        }
-        HTTP.patch(borders_url, headers=headers, json=border_payload)
+        border_payload = {"style": "Continuous", "color": {"rgb": "000000"}}
+        graph_request("PATCH", borders_url, headers, json=border_payload)
 
+    # Table headers
     start_row = 8
     table_headers = [
         "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
         "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+        "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
 
-    table_rows = [[""] * len(table_headers)]
-    full_table = [table_headers] + table_rows
-    col_end = "T"  # 19 columns → ends at column T
-    write_range = f"B{start_row}:{col_end}{start_row + len(full_table) - 1}"
-
-    # Write values
+    full_table = [table_headers, [""] * len(table_headers)]
+    col_end = "T"
+    write_range = f"B{start_row}:{col_end}{start_row+1}"
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')"
-    response = HTTP.patch(url, headers=headers, json={"values": full_table})
-    response.raise_for_status()
-
+    graph_request("PATCH", url, headers, json={"values": full_table})
     # Create table
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
-    payload = {
-        "address": f"{sheet_name}!{write_range}",
-        "hasHeaders": True
-    }
-    response = HTTP.post(url, headers=headers, json=payload)
-    response.raise_for_status()
+    payload = {"address": f"{sheet_name}!{write_range}", "hasHeaders": True}
+    response = graph_request("POST", url, headers, json=payload)
     table_id = response.json()["id"]
+    # Append data rows
     normalized_df = normalize_hach(df)
-    print("Df normalized")
-    print(normalized_df)
     rows_to_append = normalized_df.values.tolist()
-
-    # add rows into table
     rows_url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
         f"/workbook/tables/{table_id}/rows/add"
     )
-
-    response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
-    response.raise_for_status()
+    graph_request("POST", rows_url, headers, json={"values": rows_to_append})
     print("\n✅ HACH workflow completed successfully.")
 
 
