@@ -640,10 +640,34 @@ def process_shipment(order_number: str) -> None:
             print(f"❌ Fatal error: {e}")
             import traceback
             traceback.print_exc()
+def graph_debug_request(method, url, headers=None, json=None):
+    """Send request with full debugging output."""
+    print("\n------------------------------")
+    print(f"REQUEST: {method} {url}")
+    print("HEADERS:", headers)
+    if json:
+        print("JSON:", json)
+    print("------------------------------")
 
+    if method == "GET":
+        r = HTTP.get(url, headers=headers)
+    elif method == "POST":
+        r = HTTP.post(url, headers=headers, json=json)
+    elif method == "PATCH":
+        r = HTTP.patch(url, headers=headers, json=json)
+    else:
+        raise ValueError("Unsupported method")
+
+    print("STATUS:", r.status_code)
+    try:
+        print("RESPONSE JSON:", r.json())
+    except:
+        print("RESPONSE TEXT:", r.text)
+
+    print("------------------------------\n")
+    r.raise_for_status()
+    return r
 def process_hach(df: pd.DataFrame) -> None:
-    print("in the hach func")
-    print(df)
     supplier_company = df["Supplier Company"].iloc[0]
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-", "")
@@ -651,9 +675,7 @@ def process_hach(df: pd.DataFrame) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     data = {"name": sheet_name}
-
-    response = HTTP.post(url, headers=headers, json=data)
-    response.raise_for_status()
+    graph_debug_request("POST", url, headers, data)
     table1_data = [
         ["PO", po_number],
         ["SO", "Dummy reference"],
@@ -662,16 +684,14 @@ def process_hach(df: pd.DataFrame) -> None:
     ]
     # Write data to C3:D6
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/range(address='C3:D6')"
-    response = HTTP.patch(url, headers=headers, json={"values": table1_data})
-    response.raise_for_status()
+    graph_debug_request("PATCH", url, headers, {"values": table1_data})
     # Convert A1:B2 to a table
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
     table1_payload = {
         "address": f"{sheet_name}!C3:D6",
         "hasHeaders": True
     }
-    response = HTTP.post(url, headers=headers, json=table1_payload)
-    response.raise_for_status()
+    graph_debug_request("POST", url, headers, payload)
 
     # 3. Create table #2 below table #1
     # Compute start row for second table:
@@ -685,8 +705,7 @@ def process_hach(df: pd.DataFrame) -> None:
 
     # Write second table into A3:B4
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/range(address='A{0}:B{1}')".format(start_row, start_row+1)
-    response = HTTP.patch(url, headers=headers, json={"values": table2_data})
-    response.raise_for_status()
+    graph_debug_request("PATCH", url, headers, {"values": table2_data})
 
     # Convert A3:B4 to a second table
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
@@ -694,8 +713,7 @@ def process_hach(df: pd.DataFrame) -> None:
         "address": f"{sheet_name}!A{start_row}:B{start_row+1}",
         "hasHeaders": True
     }
-    response = HTTP.post(url, headers=headers, json=table2_payload)
-    response.raise_for_status()
+    graph_debug_request("POST", url, headers, payload)
 
     return "HACH workflow completed"
 
