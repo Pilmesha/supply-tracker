@@ -668,89 +668,89 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def process_hach(df: pd.DataFrame) -> None:
-    po_full = df["PO"].iloc[0]
-    po_number = po_full.replace("PO-00", "")
-    sheet_name = po_number
+    try:
+        po_full = df["PO"].iloc[0]
+        po_number = po_full.replace("PO-00", "")
+        sheet_name = po_number
 
-    print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
+        print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
 
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-    # ---------------------------
-    # Create sheet
-    # ---------------------------
-    HTTP.post(
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
-        headers=headers,
-        json={"name": sheet_name}
-    ).raise_for_status()
+        # ---------------------------
+        # Create sheet
+        # ---------------------------
+        HTTP.post(
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
+            headers=headers,
+            json={"name": sheet_name}
+        ).raise_for_status()
 
-    # ---------------------------
-    # Write info table 
-    # ---------------------------
-    info_data = [
-        ["PO", po_number],
-        ["SO", df["Reference"].iloc[0]],
-        ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
-        ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
-    ]
+        # ---------------------------
+        # Write info table 
+        # ---------------------------
+        info_data = [
+            ["PO", po_number],
+            ["SO", df["Reference"].iloc[0]],
+            ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
+            ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
+        ]
 
-    HTTP.patch(
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
-        headers=headers,
-        json={"values": info_data}
-    ).raise_for_status()
+        HTTP.patch(
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
+            headers=headers,
+            json={"values": info_data}
+        ).raise_for_status()
 
-    # ---------------------------
-    # Create ONLY header row for table
-    # ---------------------------
-    start_row = 8
-    table_headers = [
-        "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
-        "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
-        "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
-        "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
-    ]
+        start_row = 8
+        table_headers = [
+            "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
+            "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
+            "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+            "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+            "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
+        ]
 
-    # ONLY headers — NO empty row
-    write_range = f"B{start_row}:T{start_row}"
+        # ONLY headers — NO empty row
+        write_range = f"B{start_row}:T{start_row}"
 
-    HTTP.patch(
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
-        headers=headers,
-        json={"values": [table_headers]},
-    ).raise_for_status()
+        HTTP.patch(
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
+            headers=headers,
+            json={"values": [table_headers]},
+        ).raise_for_status()
 
-    # ---------------------------
-    # Create table
-    # ---------------------------
-    r = HTTP.post(
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-        headers=headers,
-        json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True},
-    )
-    r.raise_for_status()
-    table_id = r.json()["id"]
+        r = HTTP.post(
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
+            headers=headers,
+            json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True},
+        )
+        r.raise_for_status()
+        table_id = r.json()["id"]
 
-    # ---------------------------
-    # Normalize the dataframe
-    # ---------------------------
-    normalized_df = normalize_hach(df)
-    normalized_df = normalized_df.fillna("").astype(str)
-    rows_to_append = normalized_df.values.tolist()
+        normalized_df = normalize_hach(df)
+        normalized_df = normalized_df.fillna("").astype(str)
+        rows_to_append = normalized_df.values.tolist()
 
-    # ---------------------------
-    # Append rows safely
-    # ---------------------------
-    rows_url = (
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-        f"/workbook/tables/{table_id}/rows/add"
-    )
-
-    HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
-
-    print("\n✅ HACH workflow completed successfully.")
+        # ---------------------------
+        # Append rows safely
+        # ---------------------------
+        rows_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+            f"/workbook/tables/{table_id}/rows/add"
+        )
+        print(f"🔍 Debug: About to add {len(rows_to_append)} rows to table {table_id}")
+        response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
+        print(f"🔍 Response status: {response.status_code}")
+        if response.status_code != 200:
+            print(f"🔍 Response body: {response.text}")
+        response.raise_for_status()
+        print("\n✅ HACH workflow completed successfully.")
+    except Exception as e:
+        print(f"❌ HACH processing failed: {str(e)}")
+        print(f"🔍 DataFrame shape: {df.shape}")
+        print(f"🔍 DataFrame columns: {df.columns.tolist()}")
+        raise
 
 
 
@@ -791,6 +791,8 @@ def purchase_webhook():
 
     try:
         PO_df = get_purchase_order_df(order_id)
+        if PO_df is None:  # HACH was already processed in get_purchase_order_df
+            return "OK", 200
         PO_df_copy = PO_df.copy()   # avoid referencing outer objects
         PO_df = None
         PO_future = POOL.submit(update_excel, PO_df_copy)
