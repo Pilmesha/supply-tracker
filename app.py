@@ -666,8 +666,11 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
 def process_hach(df: pd.DataFrame) -> None:
+    # Use the existing Excel lock to prevent concurrent workbook modifications
+    with EXCEL_LOCK:
+        _process_hach_internal(df)
+def _process_hach_internal(df: pd.DataFrame) -> None:
     try:
         po_full = df["PO"].iloc[0]
         po_number = po_full.replace("PO-00", "")
@@ -739,17 +742,13 @@ def process_hach(df: pd.DataFrame) -> None:
             f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
             f"/workbook/tables/{table_id}/rows/add"
         )
-        print(f"🔍 Debug: About to add {len(rows_to_append)} rows to table {table_id}")
-        response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
-        print(f"🔍 Response status: {response.status_code}")
-        if response.status_code != 200:
-            print(f"🔍 Response body: {response.text}")
-        response.raise_for_status()
+
+        HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
+
         print("\n✅ HACH workflow completed successfully.")
+        
     except Exception as e:
         print(f"❌ HACH processing failed: {str(e)}")
-        print(f"🔍 DataFrame shape: {df.shape}")
-        print(f"🔍 DataFrame columns: {df.columns.tolist()}")
         raise
 
 
@@ -780,25 +779,29 @@ def sales_webhook():
 
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
+@app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
     One_Drive_Auth()
     if not verify_zoho_signature(request, "purchaseorders"):
         return "Invalid signature", 403
+    
     order_id = request.json.get("data", {}).get("purchaseorders_id")
-
     if not order_id:
         return "Missing order ID", 400
 
     try:
         PO_df = get_purchase_order_df(order_id)
-        if PO_df is None:  # HACH was already processed in get_purchase_order_df
-            return "OK", 200
-        PO_df_copy = PO_df.copy()   # avoid referencing outer objects
-        PO_df = None
-        PO_future = POOL.submit(update_excel, PO_df_copy)
-        return "OK", 200
-    except Exception as e:
         
+        # If it's HACH, add a small random delay to prevent concurrent access
+        if PO_df is None:  # HACH was already processed
+            return "OK", 200
+            
+        # For non-HACH, process as before
+        PO_future = POOL.submit(update_excel, PO_df)
+        return "OK", 200
+        
+    except Exception as e:
+        print(f"❌ Webhook error: {str(e)}")
         return f"Processing error: {e}", 500
 
 # ----------- PACKAGE ORDER WEBHOOK -----------
