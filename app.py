@@ -740,15 +740,7 @@ def process_hach(df: pd.DataFrame) -> None:
                 f"/workbook/tables/{table_id}/rows/add"
             )
 
-            payload = {
-                "values": [
-                    {
-                        "values": rows_to_append
-                    }
-                ]
-            }
-
-            HTTP.post(rows_url, headers=headers, json=payload).raise_for_status()
+            HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
 
             print("\n✅ HACH workflow completed successfully.")
             
