@@ -671,16 +671,23 @@ def process_hach(df: pd.DataFrame) -> None:
     po_full = df["PO"].iloc[0]
     po_number = po_full.replace("PO-00", "")
     sheet_name = po_number
+
     print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
 
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-    # Create worksheet
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
-    response = HTTP.post(url, headers=headers, json={"name": sheet_name})
-    response.raise_for_status()
+    # ---------------------------
+    # Create sheet
+    # ---------------------------
+    HTTP.post(
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
+        headers=headers,
+        json={"name": sheet_name}
+    ).raise_for_status()
 
-    # Fill header info
+    # ---------------------------
+    # Write info table 
+    # ---------------------------
     info_data = [
         ["PO", po_number],
         ["SO", df["Reference"].iloc[0]],
@@ -688,22 +695,15 @@ def process_hach(df: pd.DataFrame) -> None:
         ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
     ]
 
-    info_range = "C3:D6"
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
-    response = HTTP.patch(url, headers=headers, json={"values": info_data})
-    response.raise_for_status()
+    HTTP.patch(
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
+        headers=headers,
+        json={"values": info_data}
+    ).raise_for_status()
 
-    # Borders
-    edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"]
-    for edge in edges:
-        borders_url = (
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-            f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/{edge}"
-        )
-        payload = {"style": "Continuous", "color": {"rgb": "000000"}}
-        HTTP.patch(borders_url, headers=headers, json=payload)
-
-    # Table area
+    # ---------------------------
+    # Create ONLY header row for table
+    # ---------------------------
     start_row = 8
     table_headers = [
         "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
@@ -713,38 +713,42 @@ def process_hach(df: pd.DataFrame) -> None:
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
 
-    # FIX 1 — no empty row in table
-    full_table = [table_headers]
-    col_end = "T"
-    write_range = f"B{start_row}:{col_end}{start_row}"
+    # ONLY headers — NO empty row
+    write_range = f"B{start_row}:T{start_row}"
 
-    # Write header row
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')"
-    response = HTTP.patch(url, headers=headers, json={"values": full_table})
-    response.raise_for_status()
+    HTTP.patch(
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
+        headers=headers,
+        json={"values": [table_headers]},
+    ).raise_for_status()
 
-    # Create table — FIX 2: wrap sheet name in quotes
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
-    payload = {
-        "address": f"'{sheet_name}'!{write_range}",
-        "hasHeaders": True
-    }
-    response = HTTP.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-    table_id = response.json()["id"]
+    # ---------------------------
+    # Create table
+    # ---------------------------
+    r = HTTP.post(
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
+        headers=headers,
+        json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True},
+    )
+    r.raise_for_status()
+    table_id = r.json()["id"]
 
-    # Normalize data — FIX 3 for datatypes
+    # ---------------------------
+    # Normalize the dataframe
+    # ---------------------------
     normalized_df = normalize_hach(df)
+    normalized_df = normalized_df.fillna("").astype(str)
     rows_to_append = normalized_df.values.tolist()
 
-    # Append rows
+    # ---------------------------
+    # Append rows safely
+    # ---------------------------
     rows_url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
         f"/workbook/tables/{table_id}/rows/add"
     )
 
-    response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
-    response.raise_for_status()
+    HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
 
     print("\n✅ HACH workflow completed successfully.")
 
