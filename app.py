@@ -649,17 +649,23 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
         "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
+
     df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']].copy()
     df = df.rename({"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"}, axis=1)
     df["Item"] = df.index + 1
+
     # Create missing cols
     for col in table_cols:
         if col not in df.columns:
             df[col] = ""
+
     df = df[table_cols]
-    df = df.fillna("")
+
+    # Ensure pure strings
+    df = df.fillna("").astype(str)
+
     return df
-    
+
 
 def process_hach(df: pd.DataFrame) -> None:
     po_full = df["PO"].iloc[0]
@@ -669,10 +675,12 @@ def process_hach(df: pd.DataFrame) -> None:
 
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
+    # Create worksheet
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
     response = HTTP.post(url, headers=headers, json={"name": sheet_name})
     response.raise_for_status()
 
+    # Fill header info
     info_data = [
         ["PO", po_number],
         ["SO", df["Reference"].iloc[0]],
@@ -685,49 +693,51 @@ def process_hach(df: pd.DataFrame) -> None:
     response = HTTP.patch(url, headers=headers, json={"values": info_data})
     response.raise_for_status()
 
+    # Borders
     edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"]
     for edge in edges:
         borders_url = (
             f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
             f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/{edge}"
         )
-        border_payload = {
-            "style": "Continuous",
-            "color": {"rgb": "000000"}  # black border
-        }
-        HTTP.patch(borders_url, headers=headers, json=border_payload)
+        payload = {"style": "Continuous", "color": {"rgb": "000000"}}
+        HTTP.patch(borders_url, headers=headers, json=payload)
 
+    # Table area
     start_row = 8
     table_headers = [
         "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
         "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+        "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
 
-    table_rows = [[""] * len(table_headers)]
-    full_table = [table_headers] + table_rows
-    col_end = "T"  # 19 columns → ends at column T
-    write_range = f"B{start_row}:{col_end}{start_row + len(full_table) - 1}"
+    # FIX 1 — no empty row in table
+    full_table = [table_headers]
+    col_end = "T"
+    write_range = f"B{start_row}:{col_end}{start_row}"
 
-    # Write values
+    # Write header row
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')"
     response = HTTP.patch(url, headers=headers, json={"values": full_table})
     response.raise_for_status()
 
-    # Create table
+    # Create table — FIX 2: wrap sheet name in quotes
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
     payload = {
-        "address": f"{sheet_name}!{write_range}",
+        "address": f"'{sheet_name}'!{write_range}",
         "hasHeaders": True
     }
     response = HTTP.post(url, headers=headers, json=payload)
     response.raise_for_status()
     table_id = response.json()["id"]
+
+    # Normalize data — FIX 3 for datatypes
     normalized_df = normalize_hach(df)
     rows_to_append = normalized_df.values.tolist()
 
-    # add rows into table
+    # Append rows
     rows_url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
         f"/workbook/tables/{table_id}/rows/add"
@@ -735,7 +745,9 @@ def process_hach(df: pd.DataFrame) -> None:
 
     response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
     response.raise_for_status()
+
     print("\n✅ HACH workflow completed successfully.")
+
 
 
 
