@@ -197,7 +197,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             for item in line_items
         ])
     if supplier_company == "HACH":
-        process_hach(df)
+        POOL.submit(process_hach, df)
         return None
     return df
 # ----------- HELPER FUNCS FOR EXCEL -----------
@@ -667,132 +667,86 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def process_hach(df: pd.DataFrame) -> None:
-    # Use the existing Excel lock to prevent concurrent workbook modifications
     with EXCEL_LOCK:
-        _process_hach_internal(df)
-def _process_hach_internal(df: pd.DataFrame) -> None:
-    try:
-        po_full = df["PO"].iloc[0]
-        po_number = po_full.replace("PO-00", "")
-        sheet_name = po_number
+        try:
+            po_full = df["PO"].iloc[0]
+            po_number = po_full.replace("PO-00", "")
+            sheet_name = po_number
 
-        print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
+            print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
 
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-        # ---------------------------
-        # Create sheet
-        # ---------------------------
-        HTTP.post(
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
-            headers=headers,
-            json={"name": sheet_name}
-        ).raise_for_status()
+            # ---------------------------
+            # Create sheet
+            # ---------------------------
+            HTTP.post(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
+                headers=headers,
+                json={"name": sheet_name}
+            ).raise_for_status()
 
-        # ---------------------------
-        # Write info table 
-        # ---------------------------
-        info_data = [
-            ["PO", po_number],
-            ["SO", df["Reference"].iloc[0]],
-            ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
-            ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
-        ]
+            # ---------------------------
+            # Write info table 
+            # ---------------------------
+            info_data = [
+                ["PO", po_number],
+                ["SO", df["Reference"].iloc[0]],
+                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
+                ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
+            ]
 
-        HTTP.patch(
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
-            headers=headers,
-            json={"values": info_data}
-        ).raise_for_status()
+            HTTP.patch(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
+                headers=headers,
+                json={"values": info_data}
+            ).raise_for_status()
 
-        start_row = 8
-        table_headers = [
-            "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
-            "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-            "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
-            "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
-            "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
-        ]
+            start_row = 8
+            table_headers = [
+                "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
+                "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
+                "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+                "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+                "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
+            ]
 
-        # ONLY headers — NO empty row
-        write_range = f"B{start_row}:T{start_row}"
+            # ONLY headers — NO empty row
+            write_range = f"B{start_row}:T{start_row}"
 
-        HTTP.patch(
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
-            headers=headers,
-            json={"values": [table_headers]},
-        ).raise_for_status()
+            HTTP.patch(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
+                headers=headers,
+                json={"values": [table_headers]},
+            ).raise_for_status()
 
-        r = HTTP.post(
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-            headers=headers,
-            json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True},
-        )
-        r.raise_for_status()
-        table_id = r.json()["id"]
+            r = HTTP.post(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
+                headers=headers,
+                json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True},
+            )
+            r.raise_for_status()
+            table_id = r.json()["id"]
 
-        normalized_df = normalize_hach(df)
-        normalized_df = normalized_df.fillna("").astype(str)
-        rows_to_append = normalized_df.values.tolist()
+            normalized_df = normalize_hach(df)
+            normalized_df = normalized_df.fillna("").astype(str)
+            rows_to_append = normalized_df.values.tolist()
 
-        # ---------------------------
-        # Append rows safely
-        # ---------------------------
-        rows_url = (
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-            f"/workbook/tables/{table_id}/rows/add"
-        )
+            # ---------------------------
+            # Append rows safely
+            # ---------------------------
+            rows_url = (
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                f"/workbook/tables/{table_id}/rows/add"
+            )
 
-        normalized_df = normalize_hach(df)
-        normalized_df = normalized_df.fillna("").astype(str)
-        rows_to_append = normalized_df.values.tolist()
+            HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
 
-        print(f"🔍 About to add {len(rows_to_append)} rows to table {table_id}")
-
-        # MANUAL RETRY LOGIC - the built-in retry isn't working for 500 errors
-        max_retries = 5
-        last_exception = None
-        
-        for attempt in range(max_retries):
-            try:
-                print(f"🔄 Attempt {attempt + 1}/{max_retries} to add rows...")
-                response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
-                
-                if response.status_code == 201 or response.status_code == 200:
-                    print("✅ Rows added successfully!")
-                    break  # Success!
-                
-                # If not success, raise an exception to trigger retry
-                response.raise_for_status()
-                
-            except requests.exceptions.HTTPError as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + 2  # Exponential backoff: 2, 4, 6, 8, 10 seconds
-                    print(f"⚠️ Row append failed with {e.response.status_code if e.response else 'no response'}, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"❌ All retry attempts failed for row append")
-                    raise last_exception
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + 2
-                    print(f"⚠️ Request failed: {str(e)}, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"❌ All retry attempts failed")
-                    raise last_exception
-
-        print("\n✅ HACH workflow completed successfully.")
-        
-    except Exception as e:
-        print(f"❌ HACH processing failed: {str(e)}")
-        raise
-
-
-
-
+            print("\n✅ HACH workflow completed successfully.")
+            
+        except Exception as e:
+            print(f"❌ HACH processing failed: {str(e)}")
+            raise
 
 @app.route("/")
 def index():
