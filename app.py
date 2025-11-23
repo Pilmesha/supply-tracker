@@ -740,7 +740,15 @@ def process_hach(df: pd.DataFrame) -> None:
                 f"/workbook/tables/{table_id}/rows/add"
             )
 
-            HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
+            payload = {
+                "values": [
+                    {
+                        "values": rows_to_append
+                    }
+                ]
+            }
+
+            HTTP.post(rows_url, headers=headers, json=payload).raise_for_status()
 
             print("\n✅ HACH workflow completed successfully.")
             
@@ -771,7 +779,6 @@ def sales_webhook():
         return f"Processing error: {e}", 500
 
 # ----------- PURCHASE ORDER WEBHOOK -----------
-@app.route("/zoho/webhook/purchase", methods=["POST"])
 @app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
     One_Drive_Auth()
