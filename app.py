@@ -743,7 +743,46 @@ def _process_hach_internal(df: pd.DataFrame) -> None:
             f"/workbook/tables/{table_id}/rows/add"
         )
 
-        HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
+        normalized_df = normalize_hach(df)
+        normalized_df = normalized_df.fillna("").astype(str)
+        rows_to_append = normalized_df.values.tolist()
+
+        print(f"🔍 About to add {len(rows_to_append)} rows to table {table_id}")
+
+        # MANUAL RETRY LOGIC - the built-in retry isn't working for 500 errors
+        max_retries = 5
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"🔄 Attempt {attempt + 1}/{max_retries} to add rows...")
+                response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
+                
+                if response.status_code == 201 or response.status_code == 200:
+                    print("✅ Rows added successfully!")
+                    break  # Success!
+                
+                # If not success, raise an exception to trigger retry
+                response.raise_for_status()
+                
+            except requests.exceptions.HTTPError as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + 2  # Exponential backoff: 2, 4, 6, 8, 10 seconds
+                    print(f"⚠️ Row append failed with {e.response.status_code if e.response else 'no response'}, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ All retry attempts failed for row append")
+                    raise last_exception
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + 2
+                    print(f"⚠️ Request failed: {str(e)}, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ All retry attempts failed")
+                    raise last_exception
 
         print("\n✅ HACH workflow completed successfully.")
         
