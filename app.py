@@ -642,56 +642,24 @@ def process_shipment(order_number: str) -> None:
             import traceback
             traceback.print_exc()
 def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize dataframe for HACH workflow with proper column handling."""
-    try:
-        # Define expected columns in order
-        table_cols = [
-            "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
-            "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-            "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
-            "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
-            "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
-        ]
-        
-        # Create working copy and handle missing source columns
-        df_working = df.copy()
-        
-        # Check if required source columns exist
-        required_cols = ['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']
-        missing_cols = [col for col in required_cols if col not in df_working.columns]
-        if missing_cols:
-            print(f"⚠️ Warning: Missing source columns: {missing_cols}")
-        
-        # Select and rename available columns
-        available_cols = [col for col in required_cols if col in df_working.columns]
-        df_working = df_working[available_cols].copy()
-        
-        # Rename available columns (only those that exist)
-        rename_map = {}
-        if 'Item' in df_working.columns:
-            rename_map['Item'] = 'Details'
-        if 'შეკვეთილი რაოდენობა' in df_working.columns:
-            rename_map['შეკვეთილი რაოდენობა'] = 'QTY'
-            
-        if rename_map:
-            df_working = df_working.rename(columns=rename_map)
-        
-        # Add Item numbers (handle empty dataframe case)
-        df_working["Item"] = range(1, len(df_working) + 1)
-        
-        # Create all expected columns with empty values
-        for col in table_cols:
-            if col not in df_working.columns:
-                df_working[col] = ""
-        
-        # Ensure correct column order and handle missing values
-        result_df = df_working[table_cols].fillna("")
-        
-        return result_df
-        
-    except Exception as e:
-        print(f"❌ Error in normalize_hach: {str(e)}")
-        raise
+    table_cols = [
+        "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
+        "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
+        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+        "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+        "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
+    ]
+    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']].copy()
+    df = df.rename({"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"}, axis=1)
+    df["Item"] = df.index + 1
+    # Create missing cols
+    for col in table_cols:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[table_cols]
+    df = df.fillna("")
+    return df
+    
 
 def process_hach(df: pd.DataFrame) -> None:
     po_full = df["PO"].iloc[0]
@@ -701,30 +669,10 @@ def process_hach(df: pd.DataFrame) -> None:
 
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-    # Simple retry function for API calls
-    def api_call_with_retry(method, url, json_data=None, max_retries=3):
-        for attempt in range(max_retries):
-            try:
-                if method == "POST":
-                    response = HTTP.post(url, headers=headers, json=json_data)
-                elif method == "PATCH":
-                    response = HTTP.patch(url, headers=headers, json=json_data)
-                else:
-                    response = HTTP.request(method, url, headers=headers, json=json_data)
-                
-                response.raise_for_status()
-                return response
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + random.uniform(0.1, 0.5)
-                    print(f"⚠️ API call failed, retrying in {wait_time:.1f}s... (Attempt {attempt + 1}/{max_retries})")
-                    time.sleep(wait_time)
-                else:
-                    raise e
-
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
-    response = api_call_with_retry("POST", url, {"name": sheet_name})
-    
+    response = HTTP.post(url, headers=headers, json={"name": sheet_name})
+    response.raise_for_status()
+
     info_data = [
         ["PO", po_number],
         ["SO", df["Reference"].iloc[0]],
@@ -734,7 +682,8 @@ def process_hach(df: pd.DataFrame) -> None:
 
     info_range = "C3:D6"
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
-    response = api_call_with_retry("PATCH", url, {"values": info_data})
+    response = HTTP.patch(url, headers=headers, json={"values": info_data})
+    response.raise_for_status()
 
     edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"]
     for edge in edges:
@@ -746,7 +695,7 @@ def process_hach(df: pd.DataFrame) -> None:
             "style": "Continuous",
             "color": {"rgb": "000000"}  # black border
         }
-        api_call_with_retry("PATCH", borders_url, border_payload)
+        HTTP.patch(borders_url, headers=headers, json=border_payload)
 
     start_row = 8
     table_headers = [
@@ -763,7 +712,8 @@ def process_hach(df: pd.DataFrame) -> None:
 
     # Write values
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')"
-    response = api_call_with_retry("PATCH", url, {"values": full_table})
+    response = HTTP.patch(url, headers=headers, json={"values": full_table})
+    response.raise_for_status()
 
     # Create table
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
@@ -771,19 +721,20 @@ def process_hach(df: pd.DataFrame) -> None:
         "address": f"{sheet_name}!{write_range}",
         "hasHeaders": True
     }
-    response = api_call_with_retry("POST", url, payload)
+    response = HTTP.post(url, headers=headers, json=payload)
+    response.raise_for_status()
     table_id = response.json()["id"]
-    
     normalized_df = normalize_hach(df)
     rows_to_append = normalized_df.values.tolist()
 
-    # add rows into table with retry
+    # add rows into table
     rows_url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
         f"/workbook/tables/{table_id}/rows/add"
     )
 
-    response = api_call_with_retry("POST", rows_url, {"values": rows_to_append})
+    response = HTTP.post(rows_url, headers=headers, json={"values": rows_to_append})
+    response.raise_for_status()
     print("\n✅ HACH workflow completed successfully.")
 
 
