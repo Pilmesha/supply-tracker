@@ -694,120 +694,97 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
         raise
 
 def process_hach(df: pd.DataFrame) -> None:
-    """Process HACH workflow with comprehensive error handling."""
-    try:
-        # Validate input dataframe
-        if df.empty:
-            raise ValueError("Input dataframe is empty")
-        
-        # Extract PO information safely
-        if 'PO' not in df.columns:
-            raise ValueError("Missing 'PO' column in input dataframe")
-            
-        po_full = df["PO"].iloc[0]
-        if pd.isna(po_full) or not po_full:
-            raise ValueError("PO value is empty or invalid")
-            
-        po_number = str(po_full).replace("PO-00", "")
-        sheet_name = po_number
-        print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
+    po_full = df["PO"].iloc[0]
+    po_number = po_full.replace("PO-00", "")
+    sheet_name = po_number
+    print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
 
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-        # 1. Create worksheet
-        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
-        response = HTTP.post(url, headers=headers, json={"name": sheet_name})
-        response.raise_for_status()
-        print("✅ Worksheet created")
-
-        # 2. Prepare and write info data
-        info_data = [
-            ["PO", po_number],
-            ["SO", df["Reference"].iloc[0] if 'Reference' in df.columns else ""],
-            ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0] if 'შეკვეთის გაკეთების თარიღი' in df.columns else ""],
-            ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
-        ]
-
-        info_range = "C3:D6"
-        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
-        response = HTTP.patch(url, headers=headers, json={"values": info_data})
-        response.raise_for_status()
-        print("✅ Info data written")
-
-        # 3. Add borders (with error handling for each border)
-        edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"]
-        for edge in edges:
+    # Simple retry function for API calls
+    def api_call_with_retry(method, url, json_data=None, max_retries=3):
+        for attempt in range(max_retries):
             try:
-                borders_url = (
-                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                    f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/{edge}"
-                )
-                border_payload = {
-                    "style": "Continuous",
-                    "color": {"rgb": "000000"}
-                }
-                HTTP.patch(borders_url, headers=headers, json=border_payload)
+                if method == "POST":
+                    response = HTTP.post(url, headers=headers, json=json_data)
+                elif method == "PATCH":
+                    response = HTTP.patch(url, headers=headers, json=json_data)
+                else:
+                    response = HTTP.request(method, url, headers=headers, json=json_data)
+                
+                response.raise_for_status()
+                return response
             except Exception as e:
-                print(f"⚠️ Warning: Failed to set {edge} border: {str(e)}")
-        print("✅ Borders applied")
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + random.uniform(0.1, 0.5)
+                    print(f"⚠️ API call failed, retrying in {wait_time:.1f}s... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    raise e
 
-        # 4. Create table structure
-        start_row = 8
-        table_headers = [
-            "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
-            "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-            "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", 
-            "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
-            "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
-        ]
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add"
+    response = api_call_with_retry("POST", url, {"name": sheet_name})
+    
+    info_data = [
+        ["PO", po_number],
+        ["SO", df["Reference"].iloc[0]],
+        ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
+        ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
+    ]
 
-        # Create initial table with headers and one empty row
-        full_table = [table_headers] + [[""] * len(table_headers)]
-        col_end = "S"  # 19 columns (A=1, S=19) - fixed from original "T"
-        write_range = f"A{start_row}:{col_end}{start_row + len(full_table) - 1}"
+    info_range = "C3:D6"
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
+    response = api_call_with_retry("PATCH", url, {"values": info_data})
 
-        # Write table structure
-        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')"
-        response = HTTP.patch(url, headers=headers, json={"values": full_table})
-        response.raise_for_status()
-        print("✅ Table structure created")
-
-        # 5. Create Excel table
-        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
-        payload = {
-            "address": f"{sheet_name}!{write_range}",
-            "hasHeaders": True
+    edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"]
+    for edge in edges:
+        borders_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+            f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/{edge}"
+        )
+        border_payload = {
+            "style": "Continuous",
+            "color": {"rgb": "000000"}  # black border
         }
-        response = HTTP.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        table_id = response.json()["id"]
-        print("✅ Excel table created")
+        api_call_with_retry("PATCH", borders_url, border_payload)
 
-        # 6. Add data rows
-        normalized_df = normalize_hach(df)
-        if normalized_df.empty:
-            print("⚠️ Warning: No data to append after normalization")
-            return
-            
-        rows_to_append = normalized_df.values.tolist()
-        
-        # Add rows in batches to avoid timeouts with large datasets
-        batch_size = 50
-        for i in range(0, len(rows_to_append), batch_size):
-            batch = rows_to_append[i:i + batch_size]
-            rows_url = (
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                f"/workbook/tables/{table_id}/rows/add"
-            )
-            response = HTTP.post(rows_url, headers=headers, json={"values": batch})
-            response.raise_for_status()
-            print(f"✅ Added batch {i//batch_size + 1}/{(len(rows_to_append)-1)//batch_size + 1}")
+    start_row = 8
+    table_headers = [
+        "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
+        "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
+        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა", "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+        "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
+    ]
 
-        print("\n✅ HACH workflow completed successfully.")
+    table_rows = [[""] * len(table_headers)]
+    full_table = [table_headers] + table_rows
+    col_end = "T"  # 19 columns → ends at column T
+    write_range = f"B{start_row}:{col_end}{start_row + len(full_table) - 1}"
 
-    except Exception as e:
-        print(f"❌ Error in process_hach: {str(e)}")
-        raise
+    # Write values
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')"
+    response = api_call_with_retry("PATCH", url, {"values": full_table})
+
+    # Create table
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add"
+    payload = {
+        "address": f"{sheet_name}!{write_range}",
+        "hasHeaders": True
+    }
+    response = api_call_with_retry("POST", url, payload)
+    table_id = response.json()["id"]
+    
+    normalized_df = normalize_hach(df)
+    rows_to_append = normalized_df.values.tolist()
+
+    # add rows into table with retry
+    rows_url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+        f"/workbook/tables/{table_id}/rows/add"
+    )
+
+    response = api_call_with_retry("POST", rows_url, {"values": rows_to_append})
+    print("\n✅ HACH workflow completed successfully.")
 
 
 
