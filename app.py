@@ -652,16 +652,12 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']].copy()
     df = df.rename({"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"}, axis=1)
+
     df["Item"] = df.index + 1
 
-    # Create missing cols
-    for col in table_cols:
-        if col not in df.columns:
-            df[col] = ""
+    # Force exact column structure
+    df = df.reindex(columns=table_cols, fill_value="")
 
-    df = df[table_cols]
-
-    # Ensure pure strings
     df = df.fillna("").astype(str)
 
     return df
