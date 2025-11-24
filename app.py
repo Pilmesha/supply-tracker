@@ -12,21 +12,33 @@ from pytz import timezone
 from pathlib import Path
 load_dotenv()
 
-# single session (reuse connections)
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": "supply-tracker/1.0", "Content-Type": "application/x-www-form-urlencoded"})
+HTTP.headers.update({
+    "User-Agent": "supply-tracker/1.0", 
+    "Content-Type": "application/json",  # Changed from form-urlencoded to json
+    "Accept": "application/json"
+})
+
+# More aggressive retry strategy
 retry_strategy = Retry(
-    total=5,
-    backoff_factor=0.5,
+    total=8,  # Increased from 5
+    backoff_factor=1.0,  # Increased from 0.5
     status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+    allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+    respect_retry_after_header=True
 )
-adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+
+adapter = HTTPAdapter(
+    max_retries=retry_strategy, 
+    pool_connections=20,  # Increased
+    pool_maxsize=20,      # Increased
+    pool_block=False
+)
 HTTP.mount("https://", adapter)
 HTTP.mount("http://", adapter)
-# thread pool to avoid unbounded thread creation
-POOL = ThreadPoolExecutor(max_workers=4)  # tune 2-4 on free tier
-# single lock to avoid concurrent workbook uploads
+
+# Reduced thread pool to prevent API overload
+POOL = ThreadPoolExecutor(max_workers=2)  # Reduced from 4 to 2
 EXCEL_LOCK = threading.Lock()
 
 CLIENT_ID = os.getenv('CLIENT_ID')
@@ -657,64 +669,120 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
 
     # Force exact column structure
     df = df.reindex(columns=table_cols, fill_value="")
-
     df = df.fillna("").astype(str)
 
     return df
+
 def append_rows_safe(table_id, rows, headers):
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
         f"/workbook/tables/{table_id}/rows/add"
     )
 
-    for attempt in range(5):
-        r = HTTP.post(url, headers=headers, json={"values": rows})
-        if r.status_code < 400:
-            return
-        time.sleep(0.7 * (attempt + 1))
+    # Add jitter and exponential backoff
+    for attempt in range(8):  # Increased from 5 to 8
+        try:
+            # Small random delay before each attempt to avoid thundering herd
+            time.sleep(random.uniform(0.1, 0.3))
+            
+            r = HTTP.post(url, headers=headers, json={"values": rows})
+            
+            if r.status_code < 400:
+                return
+            
+            # Handle specific error codes
+            if r.status_code == 429:  # Too Many Requests
+                retry_after = int(r.headers.get('Retry-After', 10))
+                time.sleep(retry_after + random.uniform(1, 3))
+            elif r.status_code in [500, 502, 503, 504]:
+                # Exponential backoff with jitter
+                sleep_time = (2 ** attempt) + random.uniform(0.1, 1.0)
+                time.sleep(min(sleep_time, 60))  # Cap at 60 seconds
+            else:
+                # For other errors, use linear backoff
+                time.sleep(1 * (attempt + 1) + random.uniform(0.1, 0.5))
+                
+        except requests.exceptions.ConnectionError as e:
+            print(f"🔌 Connection error on attempt {attempt + 1}: {e}")
+            time.sleep((2 ** attempt) + random.uniform(0.1, 1.0))
+        except requests.exceptions.Timeout as e:
+            print(f"⏰ Timeout on attempt {attempt + 1}: {e}")
+            time.sleep((2 ** attempt) + random.uniform(0.1, 1.0))
 
-    r.raise_for_status()  # if still failing
+    # If we get here, all retries failed
+    raise Exception(f"Failed to append rows after {attempt + 1} attempts. Last status: {r.status_code}")
+
 def create_table_safe(sheet_name, table_headers):
     start_row = 8
     end_row = start_row + 200  # reserve space
 
-    # Insert headers into row 8
-    HTTP.patch(
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='B8:T8')",
-        headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"},
-        json={"values": [table_headers]},
-    ).raise_for_status()
+    # Insert headers into row 8 with retry logic
+    for attempt in range(5):
+        try:
+            HTTP.patch(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='B8:T8')",
+                headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"},
+                json={"values": [table_headers]},
+            ).raise_for_status()
+            break
+        except Exception as e:
+            if attempt == 4:
+                raise
+            time.sleep((2 ** attempt) + random.uniform(0.1, 0.5))
 
-    # Create table
-    r = HTTP.post(
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-        headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"},
-        json={"address": f"{sheet_name}!B8:T{end_row}", "hasHeaders": True},
-    )
-    r.raise_for_status()
-    return r.json()["id"]
+    # Create table with retry logic
+    for attempt in range(5):
+        try:
+            r = HTTP.post(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
+                headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"},
+                json={"address": f"{sheet_name}!B8:T{end_row}", "hasHeaders": True},
+            )
+            r.raise_for_status()
+            return r.json()["id"]
+        except Exception as e:
+            if attempt == 4:
+                raise
+            time.sleep((2 ** attempt) + random.uniform(0.1, 0.5))
+
 def create_sheet_safe(sheet_name, headers):
-    # Create sheet
-    r = HTTP.post(
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
-        headers=headers,
-        json={"name": sheet_name}
-    )
-    r.raise_for_status()
+    # Create sheet with retry
+    for attempt in range(5):
+        try:
+            r = HTTP.post(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
+                headers=headers,
+                json={"name": sheet_name}
+            )
+            r.raise_for_status()
+            break
+        except Exception as e:
+            if attempt == 4:
+                raise
+            time.sleep((2 ** attempt) + random.uniform(0.1, 0.5))
 
     # Poll until sheet becomes accessible (Graph bug workaround)
-    for _ in range(10):
-        check = HTTP.get(
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}",
-            headers=headers
-        )
-        if check.status_code == 200:
-            return True
-        time.sleep(0.3)
+    for attempt in range(15):  # Increased from 10 to 15
+        try:
+            check = HTTP.get(
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}",
+                headers=headers
+            )
+            if check.status_code == 200:
+                return True
+        except:
+            pass  # Ignore errors during polling
+        
+        # Exponential backoff for polling
+        sleep_time = min(0.5 * (2 ** attempt), 5.0)  # Cap at 5 seconds
+        time.sleep(sleep_time)
 
     raise RuntimeError("Worksheet creation timeout / Graph not ready")
 
 def process_hach(df: pd.DataFrame) -> None:
+    # Add random delay before acquiring lock to spread out requests
+    time.sleep(random.uniform(0.5, 2.0))
+    
     with EXCEL_LOCK:
         try:
             po_full = df["PO"].iloc[0]
@@ -728,7 +796,7 @@ def process_hach(df: pd.DataFrame) -> None:
             # 1️⃣ create sheet safely
             create_sheet_safe(sheet_name, headers)
 
-            # 2️⃣ write info block
+            # 2️⃣ write info block with retry
             info_data = [
                 ["PO", po_number],
                 ["SO", df["Reference"].iloc[0]],
@@ -736,12 +804,19 @@ def process_hach(df: pd.DataFrame) -> None:
                 ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
             ]
 
-            HTTP.patch(
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/"
-                f"worksheets/{sheet_name}/range(address='C3:D6')",
-                headers=headers,
-                json={"values": info_data},
-            ).raise_for_status()
+            for attempt in range(5):
+                try:
+                    HTTP.patch(
+                        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/"
+                        f"worksheets/{sheet_name}/range(address='C3:D6')",
+                        headers=headers,
+                        json={"values": info_data},
+                    ).raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt == 4:
+                        raise
+                    time.sleep((2 ** attempt) + random.uniform(0.1, 0.5))
 
             # 3️⃣ create table with buffer
             table_headers = [
@@ -754,7 +829,7 @@ def process_hach(df: pd.DataFrame) -> None:
 
             table_id = create_table_safe(sheet_name, table_headers)
 
-            # 4️⃣ append rows with retry
+            # 4️⃣ append rows with improved retry
             normalized_df = normalize_hach(df).fillna("").astype(str)
             rows_to_append = normalized_df.values.tolist()
 
@@ -802,11 +877,9 @@ def purchase_webhook():
     try:
         PO_df = get_purchase_order_df(order_id)
         
-        # If it's HACH, add a small random delay to prevent concurrent access
         if PO_df is None:  # HACH was already processed
             return "OK", 200
             
-        # For non-HACH, process as before
         PO_future = POOL.submit(update_excel, PO_df)
         return "OK", 200
         
