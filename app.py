@@ -650,56 +650,66 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
 
-    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']].copy()
-    df = df.rename({"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"}, axis=1)
+    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']]
+    df = df.rename(columns={"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"})
     df["Item"] = df.index + 1
 
-    # Create missing cols
     for col in table_cols:
         if col not in df.columns:
             df[col] = ""
 
     df = df[table_cols]
-    df = df.fillna("").astype(str)
+    return df.fillna("").astype(str)
 
-    return df
 
+# ------------------------------------------------------------------------
+# HACH Excel Workflow
+# ------------------------------------------------------------------------
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
         try:
             if df.empty:
                 raise ValueError("Empty dataframe provided to process_hach")
-                
+
             po_full = df["PO"].iloc[0]
             po_number = po_full.replace("PO-00", "")
             sheet_name = po_number
 
-            print(f"\n📌 Creating sheet '{sheet_name}' for HACH workflow...")
+            print(f"\n📌 Creating HACH sheet '{sheet_name}'...")
 
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+            headers = {
+                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+                "Content-Type": "application/json"
+            }
 
-            # Create sheet
-            response = HTTP.post(
+            # 1. Try creating worksheet
+            create_ws = HTTP.post(
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
                 headers=headers,
                 json={"name": sheet_name}
             )
-            response.raise_for_status()
 
-            # Write info table 
+            if create_ws.status_code == 409:
+                print(f"ℹ️ Sheet '{sheet_name}' already exists — continuing.")
+            else:
+                create_ws.raise_for_status()
+
+            # 2. Info table (must be exactly 4x2)
             info_data = [
                 ["PO", po_number],
-                ["SO", df["Reference"].iloc[0] if not df.empty and "Reference" in df.columns else ""],
-                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0] if not df.empty else ""],
+                ["SO", df["Reference"].iloc[0] if "Reference" in df else ""],
+                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
                 ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
             ]
 
             HTTP.patch(
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                f"/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
                 headers=headers,
                 json={"values": info_data}
             ).raise_for_status()
 
+            # 3. Header row
             start_row = 8
             table_headers = [
                 "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
@@ -712,54 +722,63 @@ def process_hach(df: pd.DataFrame) -> None:
             write_range = f"B{start_row}:T{start_row}"
 
             HTTP.patch(
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
                 headers=headers,
-                json={"values": [table_headers]},
+                json={"values": [table_headers]}
             ).raise_for_status()
 
-            r = HTTP.post(
+            # 4. Create MS Graph Table
+            table_resp = HTTP.post(
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
                 headers=headers,
-                json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True},
+                json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True}
             )
-            r.raise_for_status()
-            table_id = r.json()["id"]
+            table_resp.raise_for_status()
 
+            table_id = table_resp.json()["id"]
+
+            # 5. Add rows in batches
             normalized_df = normalize_hach(df)
-            rows_to_append = normalized_df.values.tolist()
+            rows = normalized_df.values.tolist()
 
-            # Batch large datasets to avoid timeout/rate limits
             batch_size = 50
-            for i in range(0, len(rows_to_append), batch_size):
-                batch = rows_to_append[i:i + batch_size]
-                rows_url = (
-                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                    f"/workbook/tables/{table_id}/rows/add"
-                )
-                response = HTTP.post(rows_url, headers=headers, json={"values": batch})
-                response.raise_for_status()
-                print(f"✅ Added batch {i//batch_size + 1}/{(len(rows_to_append)-1)//batch_size + 1}")
+            for i in range(0, len(rows), batch_size):
+                batch = rows[i:i + batch_size]
 
-            print(f"✅ HACH workflow completed successfully. Added {len(rows_to_append)} rows.")
-            
+                r = HTTP.post(
+                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                    f"/workbook/tables/{table_id}/rows/add",
+                    headers=headers,
+                    json={"values": batch}
+                )
+                r.raise_for_status()
+
+                print(f"   ➕ Added batch {i // batch_size + 1}")
+
+            print(f"✅ HACH workflow completed. Added {len(rows)} rows.")
+
         except Exception as e:
-            print(f"❌ HACH processing failed: {str(e)}")
-            # Log the full traceback for debugging
+            print(f"❌ HACH processing failed: {e}")
             import traceback
             traceback.print_exc()
             raise
 
+
+# ------------------------------------------------------------------------
+# Excel Update Wrapper
+# ------------------------------------------------------------------------
 def handle_excel_update(df: pd.DataFrame) -> None:
-    """Wrapper function to handle excel updates with proper error handling"""
     try:
         if df is not None and not df.empty:
             update_excel(df)
         else:
-            print("⚠️  No data to process")
+            print("⚠️ No data to process")
     except Exception as e:
         print(f"❌ Excel update failed: {str(e)}")
         import traceback
         traceback.print_exc()
+
 
 
 
@@ -791,31 +810,29 @@ def sales_webhook():
 def purchase_webhook():
     try:
         One_Drive_Auth()
+
         if not verify_zoho_signature(request, "purchaseorders"):
             return "Invalid signature", 403
-            
+
         order_id = request.json.get("data", {}).get("purchaseorders_id")
         if not order_id:
             return "Missing order ID", 400
 
-        # Get the dataframe synchronously first to catch errors early
-        PO_df = get_purchase_order_df(order_id)
-        
-        # Only submit to thread pool if we have data to process
-        if PO_df is not None and not PO_df.empty:
-            # Submit the copy to avoid reference issues
-            POOL.submit(handle_excel_update, PO_df.copy())
+        df = get_purchase_order_df(order_id)
+
+        if df is not None and not df.empty:
+            POOL.submit(handle_excel_update, df.copy())
             print(f"✅ Webhook processed successfully for order {order_id}")
         else:
-            print(f"ℹ️  No data to process for order {order_id} (possibly HACH order)")
-            
+            print(f"ℹ️ HACH order {order_id} processed (handled separately).")
+
         return "OK", 200
-        
+
     except Exception as e:
-        print(f"❌ Webhook processing error: {str(e)}")
+        print(f"❌ Webhook processing error: {e}")
         import traceback
         traceback.print_exc()
-        return f"Processing error: {str(e)}", 500
+        return f"Processing error: {e}", 500
 
 # ----------- PACKAGE ORDER WEBHOOK -----------
 @app.route('/zoho/webhook/delivered', methods=['POST'])
