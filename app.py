@@ -788,45 +788,37 @@ def graph_safe_request(method, url, headers, json=None, max_retries=5):
 
             status = resp.status_code
 
-            # ---- SUCCESS OR NON-RETRYABLE ERRORS ----
+            # SUCCESS
             if status < 400:
-                return resp   # OK
+                return resp
+
+            # Non-retryable 4xx (except 423/429)
             if status not in (423, 429) and status < 500:
-                # Non-retryable 4xx error → return response
                 resp.raise_for_status()
                 return resp
 
-            # ---- RETRYABLE ERRORS ----
-            # Retry on 423, 429, or any 5xx
+            # Retryable errors: 423, 429, or 5xx
             if status in (423, 429) or status >= 500:
-                print(f"⚠️ Graph busy (HTTP {status}), retry {attempt+1}/{max_retries}")
+                print(
+                    f"⚠️ Graph busy (HTTP {status}), retry {attempt + 1}/{max_retries}"
+                )
                 time.sleep(1 + attempt * 1.5)
                 continue
 
         except requests.RequestException as e:
-            print(f"⚠️ Graph exception: {e}, retry {attempt+1}/{max_retries}")
+            print(
+                f"⚠️ Graph exception: {e}, retry {attempt + 1}/{max_retries}"
+            )
             time.sleep(1 + attempt * 1.5)
             continue
 
-    # ---- AFTER ALL RETRIES FAILED ----
+    # After all retries
     print(f"❌ Graph failed after {max_retries} retries")
 
     if last_resp is not None:
         last_resp.raise_for_status()
     else:
         raise RuntimeError("Graph request failed with no response returned.")
-                print(f"⚠️ Graph busy (HTTP {resp.status_code}), retry {attempt+1}/{max_retries}")
-                time.sleep(1 + attempt * 1.5)
-                continue
-
-        except requests.RequestException:
-            print(f"⚠️ Graph exception, retry {attempt+1}/{max_retries}")
-            time.sleep(1 + attempt * 1.5)
-            continue
-
-    print(f"❌ Graph failed after {max_retries} retries")
-    resp.raise_for_status()
-
 
 
 
