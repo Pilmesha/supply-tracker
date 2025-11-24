@@ -660,8 +660,6 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = ""
 
     df = df[table_cols]
-
-    # Ensure pure strings
     df = df.fillna("").astype(str)
 
     return df
@@ -669,6 +667,9 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
         try:
+            if df.empty:
+                raise ValueError("Empty dataframe provided to process_hach")
+                
             po_full = df["PO"].iloc[0]
             po_number = po_full.replace("PO-00", "")
             sheet_name = po_number
@@ -677,22 +678,19 @@ def process_hach(df: pd.DataFrame) -> None:
 
             headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-            # ---------------------------
             # Create sheet
-            # ---------------------------
-            HTTP.post(
+            response = HTTP.post(
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
                 headers=headers,
                 json={"name": sheet_name}
-            ).raise_for_status()
+            )
+            response.raise_for_status()
 
-            # ---------------------------
             # Write info table 
-            # ---------------------------
             info_data = [
                 ["PO", po_number],
-                ["SO", df["Reference"].iloc[0]],
-                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
+                ["SO", df["Reference"].iloc[0] if not df.empty and "Reference" in df.columns else ""],
+                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0] if not df.empty else ""],
                 ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
             ]
 
@@ -711,7 +709,6 @@ def process_hach(df: pd.DataFrame) -> None:
                 "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
             ]
 
-            # ONLY headers — NO empty row
             write_range = f"B{start_row}:T{start_row}"
 
             HTTP.patch(
@@ -729,24 +726,40 @@ def process_hach(df: pd.DataFrame) -> None:
             table_id = r.json()["id"]
 
             normalized_df = normalize_hach(df)
-            normalized_df = normalized_df.fillna("").astype(str)
             rows_to_append = normalized_df.values.tolist()
 
-            # ---------------------------
-            # Append rows safely
-            # ---------------------------
-            rows_url = (
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                f"/workbook/tables/{table_id}/rows/add"
-            )
+            # Batch large datasets to avoid timeout/rate limits
+            batch_size = 50
+            for i in range(0, len(rows_to_append), batch_size):
+                batch = rows_to_append[i:i + batch_size]
+                rows_url = (
+                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                    f"/workbook/tables/{table_id}/rows/add"
+                )
+                response = HTTP.post(rows_url, headers=headers, json={"values": batch})
+                response.raise_for_status()
+                print(f"✅ Added batch {i//batch_size + 1}/{(len(rows_to_append)-1)//batch_size + 1}")
 
-            HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
-
-            print("\n✅ HACH workflow completed successfully.")
+            print(f"✅ HACH workflow completed successfully. Added {len(rows_to_append)} rows.")
             
         except Exception as e:
             print(f"❌ HACH processing failed: {str(e)}")
+            # Log the full traceback for debugging
+            import traceback
+            traceback.print_exc()
             raise
+
+def handle_excel_update(df: pd.DataFrame) -> None:
+    """Wrapper function to handle excel updates with proper error handling"""
+    try:
+        if df is not None and not df.empty:
+            update_excel(df)
+        else:
+            print("⚠️  No data to process")
+    except Exception as e:
+        print(f"❌ Excel update failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 
 
@@ -776,23 +789,33 @@ def sales_webhook():
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
 def purchase_webhook():
-    One_Drive_Auth()
-    if not verify_zoho_signature(request, "purchaseorders"):
-        return "Invalid signature", 403
-    order_id = request.json.get("data", {}).get("purchaseorders_id")
-
-    if not order_id:
-        return "Missing order ID", 400
-
     try:
+        One_Drive_Auth()
+        if not verify_zoho_signature(request, "purchaseorders"):
+            return "Invalid signature", 403
+            
+        order_id = request.json.get("data", {}).get("purchaseorders_id")
+        if not order_id:
+            return "Missing order ID", 400
+
+        # Get the dataframe synchronously first to catch errors early
         PO_df = get_purchase_order_df(order_id)
-        PO_df_copy = PO_df.copy()   # avoid referencing outer objects
-        PO_df = None
-        PO_future = POOL.submit(update_excel, PO_df_copy)
-        return "OK", 200
-    except Exception as e:
         
-        return f"Processing error: {e}", 500
+        # Only submit to thread pool if we have data to process
+        if PO_df is not None and not PO_df.empty:
+            # Submit the copy to avoid reference issues
+            POOL.submit(handle_excel_update, PO_df.copy())
+            print(f"✅ Webhook processed successfully for order {order_id}")
+        else:
+            print(f"ℹ️  No data to process for order {order_id} (possibly HACH order)")
+            
+        return "OK", 200
+        
+    except Exception as e:
+        print(f"❌ Webhook processing error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return f"Processing error: {str(e)}", 500
 
 # ----------- PACKAGE ORDER WEBHOOK -----------
 @app.route('/zoho/webhook/delivered', methods=['POST'])
