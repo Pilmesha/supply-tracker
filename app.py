@@ -678,22 +678,21 @@ def append_rows_safe(table_id, rows, headers):
         time.sleep(0.7 * (attempt + 1))
 
     r.raise_for_status()  # if still failing
-def create_table_safe(sheet_name, headers):
+def create_table_safe(sheet_name, table_headers):
     start_row = 8
     end_row = start_row + 200  # reserve space
-    write_range = f"B{start_row}:T{end_row}"
 
     # Insert headers into row 8
     HTTP.patch(
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='B8:T8')",
-        headers=headers,
-        json={"values": [headers]},
+        headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"},
+        json={"values": [table_headers]},
     ).raise_for_status()
 
     # Create table
     r = HTTP.post(
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-        headers=headers,
+        headers={"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"},
         json={"address": f"{sheet_name}!B8:T{end_row}", "hasHeaders": True},
     )
     r.raise_for_status()
