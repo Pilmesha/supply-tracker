@@ -683,10 +683,10 @@ def process_hach(df: pd.DataFrame) -> None:
             }
 
             # 1. Try creating worksheet
-            create_ws = HTTP.post(
+            create_ws = graph_safe_request("POST",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
-                headers=headers,
-                json={"name": sheet_name}
+                headers,
+                {"name": sheet_name}
             )
 
             if create_ws.status_code == 409:
@@ -702,11 +702,11 @@ def process_hach(df: pd.DataFrame) -> None:
                 ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
             ]
 
-            HTTP.patch(
+            graph_safe_request("PATCH",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
                 f"/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
-                headers=headers,
-                json={"values": info_data}
+                headers,
+                {"values": info_data}
             ).raise_for_status()
 
             # 3. Header row
@@ -721,18 +721,18 @@ def process_hach(df: pd.DataFrame) -> None:
 
             write_range = f"B{start_row}:T{start_row}"
 
-            HTTP.patch(
+            graph_safe_request("PATCH",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
                 f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
-                headers=headers,
-                json={"values": [table_headers]}
+                headers,
+                {"values": [table_headers]}
             ).raise_for_status()
 
             # 4. Create MS Graph Table
-            table_resp = HTTP.post(
+            table_resp = graph_safe_request("POST",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-                headers=headers,
-                json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True}
+                headers,
+                {"address": f"{sheet_name}!{write_range}", "hasHeaders": True}
             )
             table_resp.raise_for_status()
 
@@ -746,11 +746,11 @@ def process_hach(df: pd.DataFrame) -> None:
             for i in range(0, len(rows), batch_size):
                 batch = rows[i:i + batch_size]
 
-                r = HTTP.post(
+                r = graph_safe_request("POST",
                     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
                     f"/workbook/tables/{table_id}/rows/add",
-                    headers=headers,
-                    json={"values": batch}
+                    headers,
+                    {"values": batch}
                 )
                 r.raise_for_status()
 
@@ -778,6 +778,41 @@ def handle_excel_update(df: pd.DataFrame) -> None:
         print(f"❌ Excel update failed: {str(e)}")
         import traceback
         traceback.print_exc()
+def graph_safe_request(method, url, headers, json=None, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            resp = HTTP.request(method, url, headers=headers, json=json)
+
+            # If success
+            if resp.status_code < 500:
+                resp.raise_for_status()
+                return resp
+
+            # Retry on 423, 429, or any 500 range
+            if resp.status_code in (423, 429) or resp.status_code >= 500:
+                print(f"⚠️ Graph busy (HTTP {resp.status_code}), retry {attempt+1}/{max_retries}")
+                time.sleep(1 + attempt * 1.5)
+                continue
+            return resp
+
+        except requests.RequestException:
+            print(f"⚠️ Graph exception, retry {attempt+1}/{max_retries}")
+            time.sleep(1 + attempt * 1.5)
+            continue
+
+    print(f"❌ Graph failed after {max_retries} retries")
+    resp.raise_for_status()
+                print(f"⚠️ Graph busy (HTTP {resp.status_code}), retry {attempt+1}/{max_retries}")
+                time.sleep(1 + attempt * 1.5)
+                continue
+
+        except requests.RequestException:
+            print(f"⚠️ Graph exception, retry {attempt+1}/{max_retries}")
+            time.sleep(1 + attempt * 1.5)
+            continue
+
+    print(f"❌ Graph failed after {max_retries} retries")
+    resp.raise_for_status()
 
 
 
