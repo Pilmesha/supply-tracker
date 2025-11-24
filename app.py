@@ -15,8 +15,7 @@ load_dotenv()
 HTTP = requests.Session()
 HTTP.headers.update({
     "User-Agent": "supply-tracker/1.0", 
-    "Content-Type": "application/json",  # Changed from form-urlencoded to json
-    "Accept": "application/json"
+    "Content-Type": "application/x-www-form-urlencoded"
 })
 
 # More aggressive retry strategy
@@ -38,7 +37,7 @@ HTTP.mount("https://", adapter)
 HTTP.mount("http://", adapter)
 
 # Reduced thread pool to prevent API overload
-POOL = ThreadPoolExecutor(max_workers=2)  # Reduced from 4 to 2
+POOL = ThreadPoolExecutor(max_workers=4)  # Reduced from 4 to 2
 EXCEL_LOCK = threading.Lock()
 
 CLIENT_ID = os.getenv('CLIENT_ID')
