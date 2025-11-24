@@ -665,6 +665,59 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     df = df.fillna("").astype(str)
 
     return df
+def append_rows_safe(table_id, rows, headers):
+    url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+        f"/workbook/tables/{table_id}/rows/add"
+    )
+
+    for attempt in range(5):
+        r = HTTP.post(url, headers=headers, json={"values": rows})
+        if r.status_code < 400:
+            return
+        time.sleep(0.7 * (attempt + 1))
+
+    r.raise_for_status()  # if still failing
+def create_table_safe(sheet_name, headers):
+    start_row = 8
+    end_row = start_row + 200  # reserve space
+    write_range = f"B{start_row}:T{end_row}"
+
+    # Insert headers into row 8
+    HTTP.patch(
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='B8:T8')",
+        headers=headers,
+        json={"values": [headers]},
+    ).raise_for_status()
+
+    # Create table
+    r = HTTP.post(
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
+        headers=headers,
+        json={"address": f"{sheet_name}!B8:T{end_row}", "hasHeaders": True},
+    )
+    r.raise_for_status()
+    return r.json()["id"]
+def create_sheet_safe(sheet_name, headers):
+    # Create sheet
+    r = HTTP.post(
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
+        headers=headers,
+        json={"name": sheet_name}
+    )
+    r.raise_for_status()
+
+    # Poll until sheet becomes accessible (Graph bug workaround)
+    for _ in range(10):
+        check = HTTP.get(
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}",
+            headers=headers
+        )
+        if check.status_code == 200:
+            return True
+        time.sleep(0.3)
+
+    raise RuntimeError("Worksheet creation timeout / Graph not ready")
 
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
@@ -677,18 +730,10 @@ def process_hach(df: pd.DataFrame) -> None:
 
             headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
-            # ---------------------------
-            # Create sheet
-            # ---------------------------
-            HTTP.post(
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
-                headers=headers,
-                json={"name": sheet_name}
-            ).raise_for_status()
+            # 1️⃣ create sheet safely
+            create_sheet_safe(sheet_name, headers)
 
-            # ---------------------------
-            # Write info table 
-            # ---------------------------
+            # 2️⃣ write info block
             info_data = [
                 ["PO", po_number],
                 ["SO", df["Reference"].iloc[0]],
@@ -697,12 +742,13 @@ def process_hach(df: pd.DataFrame) -> None:
             ]
 
             HTTP.patch(
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/"
+                f"worksheets/{sheet_name}/range(address='C3:D6')",
                 headers=headers,
-                json={"values": info_data}
+                json={"values": info_data},
             ).raise_for_status()
 
-            start_row = 8
+            # 3️⃣ create table with buffer
             table_headers = [
                 "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
                 "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
@@ -711,41 +757,18 @@ def process_hach(df: pd.DataFrame) -> None:
                 "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
             ]
 
-            # ONLY headers — NO empty row
-            write_range = f"B{start_row}:T{start_row}"
+            table_id = create_table_safe(sheet_name, table_headers)
 
-            HTTP.patch(
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
-                headers=headers,
-                json={"values": [table_headers]},
-            ).raise_for_status()
-
-            r = HTTP.post(
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-                headers=headers,
-                json={"address": f"{sheet_name}!{write_range}", "hasHeaders": True},
-            )
-            r.raise_for_status()
-            table_id = r.json()["id"]
-
-            normalized_df = normalize_hach(df)
-            normalized_df = normalized_df.fillna("").astype(str)
+            # 4️⃣ append rows with retry
+            normalized_df = normalize_hach(df).fillna("").astype(str)
             rows_to_append = normalized_df.values.tolist()
 
-            # ---------------------------
-            # Append rows safely
-            # ---------------------------
-            rows_url = (
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                f"/workbook/tables/{table_id}/rows/add"
-            )
+            append_rows_safe(table_id, rows_to_append, headers)
 
-            HTTP.post(rows_url, headers=headers, json={"values": rows_to_append}).raise_for_status()
+            print("✅ HACH workflow completed successfully.")
 
-            print("\n✅ HACH workflow completed successfully.")
-            
         except Exception as e:
-            print(f"❌ HACH processing failed: {str(e)}")
+            print(f"❌ HACH processing failed: {e}")
             raise
 
 @app.route("/")
