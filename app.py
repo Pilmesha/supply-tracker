@@ -779,29 +779,42 @@ def handle_excel_update(df: pd.DataFrame) -> None:
         import traceback
         traceback.print_exc()
 def graph_safe_request(method, url, headers, json=None, max_retries=5):
+    last_resp = None
+
     for attempt in range(max_retries):
         try:
-            resp = HTTP.request(method, url, headers=headers, json=json)
+            resp = requests.request(method, url, headers=headers, json=json)
+            last_resp = resp
 
-            # If success
-            if resp.status_code < 500:
+            status = resp.status_code
+
+            # ---- SUCCESS OR NON-RETRYABLE ERRORS ----
+            if status < 400:
+                return resp   # OK
+            if status not in (423, 429) and status < 500:
+                # Non-retryable 4xx error → return response
                 resp.raise_for_status()
                 return resp
 
-            # Retry on 423, 429, or any 500 range
-            if resp.status_code in (423, 429) or resp.status_code >= 500:
-                print(f"⚠️ Graph busy (HTTP {resp.status_code}), retry {attempt+1}/{max_retries}")
+            # ---- RETRYABLE ERRORS ----
+            # Retry on 423, 429, or any 5xx
+            if status in (423, 429) or status >= 500:
+                print(f"⚠️ Graph busy (HTTP {status}), retry {attempt+1}/{max_retries}")
                 time.sleep(1 + attempt * 1.5)
                 continue
-            return resp
 
-        except requests.RequestException:
-            print(f"⚠️ Graph exception, retry {attempt+1}/{max_retries}")
+        except requests.RequestException as e:
+            print(f"⚠️ Graph exception: {e}, retry {attempt+1}/{max_retries}")
             time.sleep(1 + attempt * 1.5)
             continue
 
+    # ---- AFTER ALL RETRIES FAILED ----
     print(f"❌ Graph failed after {max_retries} retries")
-    resp.raise_for_status()
+
+    if last_resp is not None:
+        last_resp.raise_for_status()
+    else:
+        raise RuntimeError("Graph request failed with no response returned.")
                 print(f"⚠️ Graph busy (HTTP {resp.status_code}), retry {attempt+1}/{max_retries}")
                 time.sleep(1 + attempt * 1.5)
                 continue
