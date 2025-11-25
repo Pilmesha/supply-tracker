@@ -25,7 +25,7 @@ adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxs
 HTTP.mount("https://", adapter)
 HTTP.mount("http://", adapter)
 # thread pool to avoid unbounded thread creation
-POOL = ThreadPoolExecutor(max_workers=4)  # tune 2-4 on free tier
+POOL = ThreadPoolExecutor(max_workers=2)  # tune 2-4 on free tier
 # single lock to avoid concurrent workbook uploads
 EXCEL_LOCK = threading.Lock()
 
@@ -46,8 +46,6 @@ ACCESS_TOKEN = None
 DOC_TYPES = ["salesorders","purchaseorders"]
 
 MAILBOXES = [
-    "info@vortex.ge",
-    "archil@vortex.ge",
     "Logistics@vortex.ge",
     "hach@vortex.ge"
 ]
@@ -248,7 +246,6 @@ def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retr
         f"❌ Failed to create table after {retries} retries: "
         f"{resp.status_code} {resp.text}"
     )
-
 def get_table_columns(table_name):
     """Fetch column names of an existing Excel table"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
@@ -283,7 +280,73 @@ def get_table_start_row_from_used_range(sheet_name: str) -> int:
     start_cell = used_addr.split("!")[1].split(":")[0]  # "A1"
     start_row = int(re.findall(r"\d+", start_cell)[0])
     return start_row
+def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
+    table_cols = [
+        "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
+        "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
+        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+        "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+        "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
+    ]
 
+    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']]
+    df = df.rename(columns={"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"})
+    df["Item"] = df.index + 1
+
+    for col in table_cols:
+        if col not in df.columns:
+            df[col] = ""
+
+    df = df[table_cols]
+    return df.fillna("").astype(str)
+def handle_excel_update(df: pd.DataFrame) -> None:
+    try:
+        if df is not None and not df.empty:
+            update_excel(df)
+        else:
+            print("⚠️ No data to process")
+    except Exception as e:
+        print(f"❌ Excel update failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+def graph_safe_request(method, url, headers, json=None, max_retries=5):
+    last_resp = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.request(method, url, headers=headers, json=json)
+            last_resp = resp
+
+            status = resp.status_code
+
+            # SUCCESS
+            if status < 400:
+                return resp
+
+            # Non-retryable 4xx (except 423/429)
+            if status not in (423, 429) and status < 500:
+                resp.raise_for_status()
+                return resp
+
+            # Retryable errors: 423, 429, or 5xx
+            if status in (423, 429) or status >= 500:
+                print(
+                    f"⚠️ Graph busy (HTTP {status}), retry {attempt + 1}/{max_retries}"
+                )
+                time.sleep(1 + attempt * 1.5)
+                continue
+
+        except requests.RequestException as e:
+            print(
+                f"⚠️ Graph exception: {e}, retry {attempt + 1}/{max_retries}"
+            )
+            time.sleep(1 + attempt * 1.5)
+            continue
+    print(f"❌ Graph failed after {max_retries} retries")
+
+    if last_resp is not None:
+        last_resp.raise_for_status()
+    else:
+        raise RuntimeError("Graph request failed with no response returned.")
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
@@ -331,7 +394,6 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     else:
         print("❌ Error response content (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
-
 def get_sheet_values(sheet_name: str):
     """Get actual usedRange values (including header row)."""
     url = (
@@ -489,7 +551,145 @@ def update_excel(new_df: pd.DataFrame) -> None:
             del existing_df
             del new_df
             gc.collect()
+def process_hach(df: pd.DataFrame) -> None:
+    with EXCEL_LOCK:
+        try:
+            if df.empty:
+                raise ValueError("Empty dataframe provided to process_hach")
 
+            po_full = df["PO"].iloc[0]
+            po_number = po_full.replace("PO-00", "")
+            sheet_name = po_number
+
+            print(f"\n📌 Creating HACH sheet '{sheet_name}'...")
+
+            headers = {
+                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+                "Content-Type": "application/json"
+            }
+
+            # 1. Try creating worksheet
+            create_ws = graph_safe_request("POST",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
+                headers,
+                {"name": sheet_name}
+            )
+
+            if create_ws.status_code == 409:
+                print(f"ℹ️ Sheet '{sheet_name}' already exists — continuing.")
+            else:
+                create_ws.raise_for_status()
+
+            # 2. Info table (must be exactly 4x2)
+            info_data = [
+                ["PO", po_number],
+                ["SO", df["Reference"].iloc[0] if "Reference" in df else ""],
+                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
+                ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
+            ]
+
+            graph_safe_request("PATCH",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                f"/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
+                headers,
+                {"values": info_data}
+            ).raise_for_status()
+
+            # 3. Header row
+            start_row = 8
+            table_headers = [
+                "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
+                "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
+                "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
+                "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
+                "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
+            ]
+
+            write_range = f"B{start_row}:T{start_row}"
+
+            graph_safe_request("PATCH",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
+                headers,
+                {"values": [table_headers]}
+            ).raise_for_status()
+
+            # 4. Create MS Graph Table
+            table_resp = graph_safe_request("POST",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
+                headers,
+                {"address": f"{sheet_name}!{write_range}", "hasHeaders": True}
+            )
+            table_resp.raise_for_status()
+
+            table_id = table_resp.json()["id"]
+
+            # 5. Add rows in batches
+            normalized_df = normalize_hach(df)
+            rows = normalized_df.values.tolist()
+
+            batch_size = 50
+            for i in range(0, len(rows), batch_size):
+                batch = rows[i:i + batch_size]
+
+                r = graph_safe_request("POST",
+                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                    f"/workbook/tables/{table_id}/rows/add",
+                    headers,
+                    {"values": batch}
+                )
+                r.raise_for_status()
+
+                print(f"   ➕ Added batch {i // batch_size + 1}")
+
+            print(f"✅ HACH workflow completed. Added {len(rows)} rows.")
+
+        except Exception as e:
+            print(f"❌ HACH processing failed: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+def process_shipment(order_number: str) -> None:
+        try:
+            # --- Load sheet values ---
+            data = get_sheet_values("მიმდინარე ")
+            if not data or not isinstance(data, list) or len(data) < 2:
+                print("⚠️ No data or insufficient rows in source sheet")
+                return
+
+            # Ensure proper row formatting
+            data = [list(row) for row in data]
+
+            # Build DataFrame safely
+            df_source = pd.DataFrame(data[1:], columns=data[0])
+
+            # --- Filter matching rows ---
+            order_number = str(order_number).strip()
+            matching = df_source[df_source["SO"].astype(str).str.strip() == order_number].copy()
+
+
+            if matching.empty:
+                print(f"⚠️ No rows found for SO = {order_number}")
+                return
+
+            matching.loc[:, "ადგილმდებარეობა"] = "ჩაბარდა"
+            # --- Append only (no deletion) ---
+            append_dataframe_to_table(matching, "ჩამოსული")
+
+            start_row = get_table_start_row_from_used_range("მიმდინარე ")
+            table_row_indices = matching.index.tolist()
+            worksheet_rows = [start_row + 1 + idx for idx in table_row_indices]
+
+
+            # --- DELETE FROM THE TABLE ---
+            delete_table_rows("მიმდინარე ", worksheet_rows)
+
+            print(f"✅ Completed processing for SO {order_number}")
+
+        except Exception as e:
+            print(f"❌ Fatal error: {e}")
+            import traceback
+            traceback.print_exc()
 # ----------- MONDAY CHECKING -----------
 def fetch_recent_orders() -> list[dict]:
     base_url = "https://www.zohoapis.com/inventory/v1"
@@ -600,229 +800,6 @@ def monday_job():
             print("ℹ️ No new Saturday orders found, skipping cleanup.")
 
 
-def process_shipment(order_number: str) -> None:
-        try:
-            # --- Load sheet values ---
-            data = get_sheet_values("მიმდინარე ")
-            if not data or not isinstance(data, list) or len(data) < 2:
-                print("⚠️ No data or insufficient rows in source sheet")
-                return
-
-            # Ensure proper row formatting
-            data = [list(row) for row in data]
-
-            # Build DataFrame safely
-            df_source = pd.DataFrame(data[1:], columns=data[0])
-
-            # --- Filter matching rows ---
-            order_number = str(order_number).strip()
-            matching = df_source[df_source["SO"].astype(str).str.strip() == order_number].copy()
-
-
-            if matching.empty:
-                print(f"⚠️ No rows found for SO = {order_number}")
-                return
-
-            matching.loc[:, "ადგილმდებარეობა"] = "ჩაბარდა"
-            # --- Append only (no deletion) ---
-            append_dataframe_to_table(matching, "ჩამოსული")
-
-            start_row = get_table_start_row_from_used_range("მიმდინარე ")
-            table_row_indices = matching.index.tolist()
-            worksheet_rows = [start_row + 1 + idx for idx in table_row_indices]
-
-
-            # --- DELETE FROM THE TABLE ---
-            delete_table_rows("მიმდინარე ", worksheet_rows)
-
-            print(f"✅ Completed processing for SO {order_number}")
-
-        except Exception as e:
-            print(f"❌ Fatal error: {e}")
-            import traceback
-            traceback.print_exc()
-def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
-    table_cols = [
-        "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
-        "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-        "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
-        "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
-        "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
-    ]
-
-    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']]
-    df = df.rename(columns={"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"})
-    df["Item"] = df.index + 1
-
-    for col in table_cols:
-        if col not in df.columns:
-            df[col] = ""
-
-    df = df[table_cols]
-    return df.fillna("").astype(str)
-
-
-# ------------------------------------------------------------------------
-# HACH Excel Workflow
-# ------------------------------------------------------------------------
-def process_hach(df: pd.DataFrame) -> None:
-    with EXCEL_LOCK:
-        try:
-            if df.empty:
-                raise ValueError("Empty dataframe provided to process_hach")
-
-            po_full = df["PO"].iloc[0]
-            po_number = po_full.replace("PO-00", "")
-            sheet_name = po_number
-
-            print(f"\n📌 Creating HACH sheet '{sheet_name}'...")
-
-            headers = {
-                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
-                "Content-Type": "application/json"
-            }
-
-            # 1. Try creating worksheet
-            create_ws = graph_safe_request("POST",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
-                headers,
-                {"name": sheet_name}
-            )
-
-            if create_ws.status_code == 409:
-                print(f"ℹ️ Sheet '{sheet_name}' already exists — continuing.")
-            else:
-                create_ws.raise_for_status()
-
-            # 2. Info table (must be exactly 4x2)
-            info_data = [
-                ["PO", po_number],
-                ["SO", df["Reference"].iloc[0] if "Reference" in df else ""],
-                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
-                ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
-            ]
-
-            graph_safe_request("PATCH",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                f"/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
-                headers,
-                {"values": info_data}
-            ).raise_for_status()
-
-            # 3. Header row
-            start_row = 8
-            table_headers = [
-                "Item", "წერილი", "Code", "HS Code", "Details", "თარგმანი", "QTY",
-                "მიწოდების ვადა", "Confirmation 1 (shipment week)", "Packing List",
-                "რა რიცხვში გამოგზავნეს Packing List-ი", "რამდენი გამოიგზავნა",
-                "ჩამოსვლის სავარაუდო თარიღი", "რეალური ჩამოსვლის თარიღი",
-                "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
-            ]
-
-            write_range = f"B{start_row}:T{start_row}"
-
-            graph_safe_request("PATCH",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
-                headers,
-                {"values": [table_headers]}
-            ).raise_for_status()
-
-            # 4. Create MS Graph Table
-            table_resp = graph_safe_request("POST",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-                headers,
-                {"address": f"{sheet_name}!{write_range}", "hasHeaders": True}
-            )
-            table_resp.raise_for_status()
-
-            table_id = table_resp.json()["id"]
-
-            # 5. Add rows in batches
-            normalized_df = normalize_hach(df)
-            rows = normalized_df.values.tolist()
-
-            batch_size = 50
-            for i in range(0, len(rows), batch_size):
-                batch = rows[i:i + batch_size]
-
-                r = graph_safe_request("POST",
-                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                    f"/workbook/tables/{table_id}/rows/add",
-                    headers,
-                    {"values": batch}
-                )
-                r.raise_for_status()
-
-                print(f"   ➕ Added batch {i // batch_size + 1}")
-
-            print(f"✅ HACH workflow completed. Added {len(rows)} rows.")
-
-        except Exception as e:
-            print(f"❌ HACH processing failed: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-
-
-# ------------------------------------------------------------------------
-# Excel Update Wrapper
-# ------------------------------------------------------------------------
-def handle_excel_update(df: pd.DataFrame) -> None:
-    try:
-        if df is not None and not df.empty:
-            update_excel(df)
-        else:
-            print("⚠️ No data to process")
-    except Exception as e:
-        print(f"❌ Excel update failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-def graph_safe_request(method, url, headers, json=None, max_retries=5):
-    last_resp = None
-
-    for attempt in range(max_retries):
-        try:
-            resp = requests.request(method, url, headers=headers, json=json)
-            last_resp = resp
-
-            status = resp.status_code
-
-            # SUCCESS
-            if status < 400:
-                return resp
-
-            # Non-retryable 4xx (except 423/429)
-            if status not in (423, 429) and status < 500:
-                resp.raise_for_status()
-                return resp
-
-            # Retryable errors: 423, 429, or 5xx
-            if status in (423, 429) or status >= 500:
-                print(
-                    f"⚠️ Graph busy (HTTP {status}), retry {attempt + 1}/{max_retries}"
-                )
-                time.sleep(1 + attempt * 1.5)
-                continue
-
-        except requests.RequestException as e:
-            print(
-                f"⚠️ Graph exception: {e}, retry {attempt + 1}/{max_retries}"
-            )
-            time.sleep(1 + attempt * 1.5)
-            continue
-
-    # After all retries
-    print(f"❌ Graph failed after {max_retries} retries")
-
-    if last_resp is not None:
-        last_resp.raise_for_status()
-    else:
-        raise RuntimeError("Graph request failed with no response returned.")
-
-
-
-
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
@@ -874,7 +851,7 @@ def purchase_webhook():
         traceback.print_exc()
         return f"Processing error: {e}", 500
 
-# ----------- PACKAGE ORDER WEBHOOK -----------
+# ----------- DELIVERED ORDER WEBHOOK -----------
 @app.route('/zoho/webhook/delivered', methods=['POST'])
 def handle_delivery():
     One_Drive_Auth()
