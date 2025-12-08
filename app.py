@@ -16,8 +16,6 @@ load_dotenv()
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "supply-tracker/1.0", "Content-Type": "application/x-www-form-urlencoded"})
 retry_strategy = Retry(
-    total=5,
-    backoff_factor=0.5,
     status_forcelist=[429, 500, 502, 503, 504],
     allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
 )
@@ -25,7 +23,7 @@ adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxs
 HTTP.mount("https://", adapter)
 HTTP.mount("http://", adapter)
 # thread pool to avoid unbounded thread creation
-POOL = ThreadPoolExecutor(max_workers=2)  # tune 2-4 on free tier
+POOL = ThreadPoolExecutor(max_workers=4)  # tune 2-4 on free tier
 # single lock to avoid concurrent workbook uploads
 EXCEL_LOCK = threading.Lock()
 
