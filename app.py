@@ -186,21 +186,20 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                             if sku:
                                 # Get custom fields for this item
                                 item_custom_fields = item.get("custom_fields", [])
-                                
-                                # Initialize export status as "no"
+
                                 export_status = "არა"
-                                
-                                # Check custom fields for delivery, location, or lead time info
+                                delivery_location_lead_time = None
+
                                 for field in item_custom_fields:
                                     field_label = field.get("label", "").lower()
-                                    field_value = field.get("value_formatted", "").lower()
-                                    
-                                    if "Delivery, Location, Lead Time" in field_label:
-                                        if field_value:
-                                            field_value_lower = field_value.lower()
-                                            if "azerbaijan" in field_value_lower or "armenia" in field_value_lower:
-                                                export_status = "კი"
-                                                break
+                                    field_value = field.get("value_formatted", "")
+
+                                    if "delivery, location, lead time" in field_label:
+                                        delivery_location_lead_time = field_value
+
+                                        value_lower = field_value.lower()
+                                        if "azerbaijan" in value_lower or "armenia" in value_lower:
+                                            export_status = "კი"
                                 so_info_by_sku[sku] = {
                                     "SO": so_num,
                                     "SO_Customer": so_detail.get("customer_name"),
@@ -208,6 +207,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     "SO_Status": so_detail.get("status"),
                                     "SO_Item_Name": item_name,
                                     "SO_Item_Quantity": item.get("quantity"),
+                                    "SO_Delivery_Location_Lead_Time": delivery_location_lead_time,
                                     "SO_Export": export_status  # Add export status
                                 }
                         break
