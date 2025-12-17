@@ -177,7 +177,9 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         line_items = so_detail.get("line_items", [])
                         
                         print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
-                        
+                        print(so_detail)
+                        print("Line items")
+                        print(line_items)
                         for item in line_items:
                             sku = item.get("sku")
                             item_name = item.get("name")
@@ -186,16 +188,12 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                             if sku:
                                 # Get custom fields for this item
                                 item_custom_fields = item.get("custom_fields", [])
+                                print(item_custom_fields)
 
                                 export_status = "არა"
                                 delivery_location_lead_time = None
                                 print(f"\nDebug: Custom fields for SO {so_num}, SKU {sku}:")
                                 for field in item_custom_fields:
-                                    print(
-                                        f"  - Label: '{field.get('label')}', "
-                                        f"API Name: '{field.get('api_name')}', "
-                                        f"Value: '{field.get('value_formatted')}'"
-                                    )
                                     field_label = field.get("label", "").lower()
                                     field_value = field.get("value_formatted", "")
 
