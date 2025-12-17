@@ -184,13 +184,31 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                             print(f"Debug: SO Item - Name: {item_name}, SKU: {sku}")
                             
                             if sku:
+                                # Get custom fields for this item
+                                item_custom_fields = item.get("custom_fields", [])
+                                
+                                # Initialize export status as "no"
+                                export_status = "no"
+                                
+                                # Check custom fields for delivery, location, or lead time info
+                                for field in item_custom_fields:
+                                    field_label = field.get("label", "").lower()
+                                    field_value = field.get("value_formatted", "").lower()
+                                    
+                                    # Check if this is a relevant field
+                                    if any(keyword in field_label for keyword in ["delivery", "location", "lead time"]):
+                                        # Check if field value contains "azerbaijan" or "armenia"
+                                        if "Azerbaijan" in field_value or "Armenia" in field_value:
+                                            export_status = "კი"
+                                            break
                                 so_info_by_sku[sku] = {
                                     "SO": so_num,
                                     "SO_Customer": so_detail.get("customer_name"),
                                     "SO_Date": so_detail.get("date"),
                                     "SO_Status": so_detail.get("status"),
                                     "SO_Item_Name": item_name,
-                                    "SO_Item_Quantity": item.get("quantity")
+                                    "SO_Item_Quantity": item.get("quantity"),
+                                    "SO_Export": export_status  # Add export status
                                 }
                         break
             except Exception as e:
@@ -211,7 +229,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         # Check if we found a match
         is_match = "Yes" if sku in so_info_by_sku else "No"
         
-        items.append({
+        item_dict = {
             "Supplier Company": supplier,
             "PO": po_number,
             "შეკვეთის გაკეთების თარიღი": date,
@@ -227,7 +245,12 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             "SO_Date": so_data.get("SO_Date"),
             "SO_Status": so_data.get("SO_Status"),
             "SO_Match": is_match
-        })
+        }
+        # Add "Export?" column for HACH orders
+        if supplier == "HACH":
+            item_dict["Export?"] = so_data.get("SO_Export", "არა")
+        
+        items.append(item_dict)
     
     df = pd.DataFrame(items)
     
@@ -245,6 +268,10 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     
     # HACH processing
     if supplier == "HACH":
+        # Make sure we have the "Export?" column even for unmatched items
+        if "Export?" not in df.columns:
+            df["Export?"] = "არა"
+        
         process_hach(df)
         return None
     
