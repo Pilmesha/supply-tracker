@@ -177,32 +177,13 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         line_items = so_detail.get("line_items", [])
                         
                         print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
-                        print(so_detail)
-                        print("Line items")
-                        print(line_items)
+                        
                         for item in line_items:
                             sku = item.get("sku")
                             item_name = item.get("name")
                             print(f"Debug: SO Item - Name: {item_name}, SKU: {sku}")
                             
                             if sku:
-                                # Get custom fields for this item
-                                item_custom_fields = item.get("custom_fields", [])
-                                print(item_custom_fields)
-
-                                export_status = "არა"
-                                delivery_location_lead_time = None
-                                print(f"\nDebug: Custom fields for SO {so_num}, SKU {sku}:")
-                                for field in item_custom_fields:
-                                    field_label = field.get("label", "").lower()
-                                    field_value = field.get("value_formatted", "")
-
-                                    if "delivery, location, lead time" in field_label:
-                                        delivery_location_lead_time = field_value
-
-                                        value_lower = field_value.lower()
-                                        if "azerbaijan" in value_lower or "armenia" in value_lower:
-                                            export_status = "კი"
                                 so_info_by_sku[sku] = {
                                     "SO": so_num,
                                     "SO_Customer": so_detail.get("customer_name"),
@@ -210,8 +191,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     "SO_Status": so_detail.get("status"),
                                     "SO_Item_Name": item_name,
                                     "SO_Item_Quantity": item.get("quantity"),
-                                    "SO_Delivery_Location_Lead_Time": delivery_location_lead_time,
-                                    "SO_Export": export_status  # Add export status
+                                    "SO_Country": so_detail.get("country")
                                 }
                         break
             except Exception as e:
@@ -232,6 +212,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         # Check if we found a match
         is_match = "Yes" if sku in so_info_by_sku else "No"
         
+                # For HACH orders, add "Export?" column
         item_dict = {
             "Supplier Company": supplier,
             "PO": po_number,
@@ -249,35 +230,21 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             "SO_Status": so_data.get("SO_Status"),
             "SO_Match": is_match
         }
-        # Add "Export?" column for HACH orders
         if supplier == "HACH":
-            item_dict["Export?"] = so_data.get("SO_Export", "არა")
-        
+            country = (so_data.get("SO_Country") or "").lower()
+
+            if "azerbaijan" in country or "armenia" in country:
+                item_dict["Export?"] = "კი"
+            else:
+                item_dict["Export?"] = "არა"
         items.append(item_dict)
     
     df = pd.DataFrame(items)
     
     # Print summary
-    print(f"\n=== SUMMARY ===")
     matches = df[df['SO_Match'] == 'Yes']
     print(f"SOs in reference: {', '.join(so_numbers) if so_numbers else 'None'}")
     print(f"Items matched: {len(matches)}/{len(df)}")
-    
-    if len(matches) == 0 and so_numbers:
-        print("\nDebug: No matches found. Check if:")
-        print(f"1. PO SKUs: {df['Code'].tolist()}")
-        print(f"2. SO SKUs: {list(so_info_by_sku.keys())}")
-        print("3. SKUs might not match exactly")
-    
-    # HACH processing
-    if supplier == "HACH":
-        # Make sure we have the "Export?" column even for unmatched items
-        if "Export?" not in df.columns:
-            df["Export?"] = "არა"
-        
-        process_hach(df)
-        return None
-    
     return df
 # ----------- HELPER FUNCS FOR EXCEL -----------
 def get_used_range(sheet_name: str):
