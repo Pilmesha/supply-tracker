@@ -245,6 +245,9 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     matches = df[df['SO_Match'] == 'Yes']
     print(f"SOs in reference: {', '.join(so_numbers) if so_numbers else 'None'}")
     print(f"Items matched: {len(matches)}/{len(df)}")
+    if supplier == "HACH":
+        process_hach(df)
+        return None
     return df
 # ----------- HELPER FUNCS FOR EXCEL -----------
 def get_used_range(sheet_name: str):
