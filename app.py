@@ -188,19 +188,19 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                 item_custom_fields = item.get("custom_fields", [])
                                 
                                 # Initialize export status as "no"
-                                export_status = "no"
+                                export_status = "არა"
                                 
                                 # Check custom fields for delivery, location, or lead time info
                                 for field in item_custom_fields:
                                     field_label = field.get("label", "").lower()
                                     field_value = field.get("value_formatted", "").lower()
                                     
-                                    # Check if this is a relevant field
-                                    if any(keyword in field_label for keyword in ["delivery", "location", "lead time"]):
-                                        # Check if field value contains "azerbaijan" or "armenia"
-                                        if "Azerbaijan" in field_value or "Armenia" in field_value:
-                                            export_status = "კი"
-                                            break
+                                    if "Delivery, Location, Lead Time" in field_label:
+                                        if field_value:
+                                            field_value_lower = field_value.lower()
+                                            if "azerbaijan" in field_value_lower or "armenia" in field_value_lower:
+                                                export_status = "კი"
+                                                break
                                 so_info_by_sku[sku] = {
                                     "SO": so_num,
                                     "SO_Customer": so_detail.get("customer_name"),
