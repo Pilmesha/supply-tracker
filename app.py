@@ -367,7 +367,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
 
-    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']]
+    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer', 'Export?']]
     df = df.rename(columns={"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"})
     df["Item"] = df.index + 1
 
