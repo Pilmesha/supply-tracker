@@ -189,8 +189,13 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
 
                                 export_status = "არა"
                                 delivery_location_lead_time = None
-
+                                print(f"\nDebug: Custom fields for SO {so_num}, SKU {sku}:")
                                 for field in item_custom_fields:
+                                    print(
+                                        f"  - Label: '{field.get('label')}', "
+                                        f"API Name: '{field.get('api_name')}', "
+                                        f"Value: '{field.get('value_formatted')}'"
+                                    )
                                     field_label = field.get("label", "").lower()
                                     field_value = field.get("value_formatted", "")
 
