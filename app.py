@@ -202,17 +202,30 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     print(f"\nDebug: PO {po_number} has {len(po.get('line_items', []))} items")
     for idx, item in enumerate(po.get("line_items", []), 1):
         print(f"Debug: PO Item {idx} - Name: {item.get('name')}, SKU: {item.get('sku')}")
-    
+    so_country = (
+    so_detail.get("shipping_address", {}).get("country")
+    or so_detail.get("billing_address", {}).get("country")
+    or ""
+    )
+
+    print(f"Debug: SO country detected = '{so_country}'")
     # Create DataFrame
     items = []
+
     for item in po.get("line_items", []):
         sku = item.get("sku")
         so_data = so_info_by_sku.get(sku, {})
-        
-        # Check if we found a match
+
         is_match = "Yes" if sku in so_info_by_sku else "No"
-        
-                # For HACH orders, add "Export?" column
+
+        export_value = ""
+        if supplier == "HACH":
+            country_lc = so_country.lower()
+            if "azerbaijan" in country_lc or "armenia" in country_lc:
+                export_value = "კი"
+            else:
+                export_value = "არა"
+
         item_dict = {
             "Supplier Company": supplier,
             "PO": po_number,
@@ -221,22 +234,21 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             "Code": sku,
             "Reference": reference,
             "შეკვეთილი რაოდენობა": item.get("quantity"),
-            "Customer": so_data.get("SO_Customer") or 
-                       next((f.get("value_formatted") for f in item.get("item_custom_fields", []) 
-                             if f.get("label") == "Customer"), None),
+            "Customer": so_data.get("SO_Customer") or
+                next(
+                    (f.get("value_formatted")
+                    for f in item.get("item_custom_fields", [])
+                    if f.get("label") == "Customer"),
+                    None
+                ),
             "SO": so_data.get("SO"),
             "SO_Customer": so_data.get("SO_Customer"),
             "SO_Date": so_data.get("SO_Date"),
             "SO_Status": so_data.get("SO_Status"),
-            "SO_Match": is_match
+            "SO_Match": is_match,
+            "Export?": export_value
         }
-        if supplier == "HACH":
-            country = (so_data.get("SO_Country") or "").lower()
 
-            if "azerbaijan" in country or "armenia" in country:
-                item_dict["Export?"] = "კი"
-            else:
-                item_dict["Export?"] = "არა"
         items.append(item_dict)
     
     df = pd.DataFrame(items)
