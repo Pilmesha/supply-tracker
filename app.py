@@ -4,7 +4,6 @@ import pandas as pd
 from dotenv import load_dotenv
 from openpyxl import load_workbook
 from datetime import datetime, timedelta
-from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -41,9 +40,10 @@ HACH_FILE = os.getenv('HACH_FILE')
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN_EXPIRY = datetime.utcnow()
 ACCESS_TOKEN = None
-DOC_TYPES = ["salesorders","purchaseorders"]
 
 MAILBOXES = [
+    "info@vortex.ge",
+    "archil@vortex.ge",
     "Logistics@vortex.ge",
     "hach@vortex.ge"
 ]
@@ -67,8 +67,7 @@ def refresh_access_token()-> str:
 def verify_zoho_signature(request, expected_module):
     # Select secret based on webhook type
     secret_key = (
-    os.getenv("SALES_WEBHOOK_SECRET") if expected_module == "salesorders"
-    else os.getenv("PURCHASE_WEBHOOK_SECRET") if expected_module == "purchaseorders"
+    os.getenv("PURCHASE_WEBHOOK_SECRET") if expected_module == "purchaseorders"
     else os.getenv("SHIPMENT_WEBHOOK_SECRET")
     ).encode('utf-8')
     
@@ -119,49 +118,8 @@ def get_headers():
         "Content-Type": "application/json"
     }
 # ----------- GET DF -----------
-def get_sales_order_df(order_id: str) -> pd.DataFrame:
-    url = f"https://www.zohoapis.com/inventory/v1/salesorders/{order_id}"
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
-        "X-com-zoho-inventory-organizationid": ORG_ID
-    }
-
-    response = HTTP.get(url, headers=headers)
-    response.raise_for_status()
-    salesorder = response.json().get("salesorder", {})
-
-    customer_name = salesorder.get("customer_name")
-    order_number = salesorder.get("salesorder_number")
-    date = salesorder.get("date")
-    line_items = salesorder.get("line_items", [])
-
-    enriched_items = []
-    for item in line_items:
-        item_id = item.get("item_id")
-        manufacturer = None
-
-        # Lookup item details from Items API
-        if item_id:
-            item_url = f"https://www.zohoapis.com/inventory/v1/items/{item_id}"
-            item_resp = HTTP.get(item_url, headers=headers)
-            if item_resp.status_code == 200:
-                item_details = item_resp.json().get("item", {})
-                manufacturer = (
-                    item_details.get("manufacturer")
-                    or item_details.get("cf_manufacturer")
-                )
-
-        enriched_items.append({
-            "SO": order_number,
-            "Customer": customer_name,
-            "Item": item.get("name"),
-            "Code": item.get("sku"),
-            "Supplier Company": manufacturer,
-            "შეკვეთილი რაოდენობა": item.get("quantity"),
-            "შეკვეთის გაკეთების თარიღი": date
-        })
-    return pd.DataFrame(enriched_items)
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
+    # Get purchase order
     url = f"https://www.zohoapis.com/inventory/v1/purchaseorders/{order_id}"
     headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
@@ -170,31 +128,126 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
 
     response = HTTP.get(url, headers=headers)
     response.raise_for_status()
-    purchaseorder = response.json().get("purchaseorder", {})
-    po_number = purchaseorder.get("purchaseorder_number")
-    date = purchaseorder.get("date")
-    reference = purchaseorder.get("reference_number")
+    po = response.json().get("purchaseorder", {})
+    
+    supplier = po.get("vendor_name")
+    po_number = po.get("purchaseorder_number")
+    date = po.get("date")
+    reference = po.get("reference_number", "")
+    
     if reference:
         reference = reference.strip("()").strip().rstrip(",")
-    supplier_company = purchaseorder.get("vendor_name")
-    line_items = purchaseorder.get("line_items", [])
-    df = pd.DataFrame([
-            {
-                "Supplier Company": supplier_company,
-                "PO": po_number,
-                "შეკვეთის გაკეთების თარიღი": date,
-                "Item": item.get("name"),
-                "Code": item.get("sku"),
-                "Reference": reference,
-                "შეკვეთილი რაოდენობა": item.get("quantity"),
-                "Customer": next((field.get("value_formatted") for field in item.get("item_custom_fields", []) 
-                                if field.get("label") == "Customer"), None)
-            }
-            for item in line_items
-        ])
-    if supplier_company == "HACH":
+    
+    # Find SO numbers in reference
+    so_numbers = re.findall(r"(?i)SO-\d+", reference)
+    so_info_by_sku = {}
+    
+    print(f"\nDebug: Reference = '{reference}'")
+    print(f"Debug: Found SO numbers = {so_numbers}")
+    
+    # Get sales orders if found
+    if so_numbers:
+        for so_num in so_numbers:
+            so_num = so_num.upper()
+            print(f"\nDebug: Fetching SO {so_num}")
+            
+            try:
+                # First get the sales order to get its ID
+                search_response = HTTP.get(
+                    "https://www.zohoapis.com/inventory/v1/salesorders",
+                    headers=headers,
+                    params={"salesorder_number": so_num}
+                )
+                search_data = search_response.json()
+                salesorders = search_data.get("salesorders", [])
+                
+                print(f"Debug: Found {len(salesorders)} sales orders")
+                
+                for so in salesorders:
+                    if so.get("salesorder_number", "").upper() == so_num:
+                        print(f"Debug: Found exact match for {so_num}")
+                        salesorder_id = so.get("salesorder_id")
+                        
+                        # Now get the full sales order with line items
+                        so_detail_url = f"https://www.zohoapis.com/inventory/v1/salesorders/{salesorder_id}"
+                        so_response = HTTP.get(so_detail_url, headers=headers)
+                        so_response.raise_for_status()
+                        
+                        so_detail = so_response.json().get("salesorder", {})
+                        line_items = so_detail.get("line_items", [])
+                        
+                        print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
+                        
+                        for item in line_items:
+                            sku = item.get("sku")
+                            item_name = item.get("name")
+                            print(f"Debug: SO Item - Name: {item_name}, SKU: {sku}")
+                            
+                            if sku:
+                                so_info_by_sku[sku] = {
+                                    "SO": so_num,
+                                    "SO_Customer": so_detail.get("customer_name"),
+                                    "SO_Date": so_detail.get("date"),
+                                    "SO_Status": so_detail.get("status"),
+                                    "SO_Item_Name": item_name,
+                                    "SO_Item_Quantity": item.get("quantity")
+                                }
+                        break
+            except Exception as e:
+                print(f"Debug: Error fetching SO {so_num}: {e}")
+                continue
+    
+    # Debug: Print PO items
+    print(f"\nDebug: PO {po_number} has {len(po.get('line_items', []))} items")
+    for idx, item in enumerate(po.get("line_items", []), 1):
+        print(f"Debug: PO Item {idx} - Name: {item.get('name')}, SKU: {item.get('sku')}")
+    
+    # Create DataFrame
+    items = []
+    for item in po.get("line_items", []):
+        sku = item.get("sku")
+        so_data = so_info_by_sku.get(sku, {})
+        
+        # Check if we found a match
+        is_match = "Yes" if sku in so_info_by_sku else "No"
+        
+        items.append({
+            "Supplier Company": supplier,
+            "PO": po_number,
+            "შეკვეთის გაკეთების თარიღი": date,
+            "Item": item.get("name"),
+            "Code": sku,
+            "Reference": reference,
+            "შეკვეთილი რაოდენობა": item.get("quantity"),
+            "Customer": so_data.get("SO_Customer") or 
+                       next((f.get("value_formatted") for f in item.get("item_custom_fields", []) 
+                             if f.get("label") == "Customer"), None),
+            "SO": so_data.get("SO"),
+            "SO_Customer": so_data.get("SO_Customer"),
+            "SO_Date": so_data.get("SO_Date"),
+            "SO_Status": so_data.get("SO_Status"),
+            "SO_Match": is_match
+        })
+    
+    df = pd.DataFrame(items)
+    
+    # Print summary
+    print(f"\n=== SUMMARY ===")
+    matches = df[df['SO_Match'] == 'Yes']
+    print(f"SOs in reference: {', '.join(so_numbers) if so_numbers else 'None'}")
+    print(f"Items matched: {len(matches)}/{len(df)}")
+    
+    if len(matches) == 0 and so_numbers:
+        print("\nDebug: No matches found. Check if:")
+        print(f"1. PO SKUs: {df['Code'].tolist()}")
+        print(f"2. SO SKUs: {list(so_info_by_sku.keys())}")
+        print("3. SKUs might not match exactly")
+    
+    # HACH processing
+    if supplier == "HACH":
         process_hach(df)
         return None
+    
     return df
 # ----------- HELPER FUNCS FOR EXCEL -----------
 def get_used_range(sheet_name: str):
@@ -297,16 +350,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df[table_cols]
     return df.fillna("").astype(str)
-def handle_excel_update(df: pd.DataFrame) -> None:
-    try:
-        if df is not None and not df.empty:
-            update_excel(df)
-        else:
-            print("⚠️ No data to process")
-    except Exception as e:
-        print(f"❌ Excel update failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
+
 def graph_safe_request(method, url, headers, json=None, max_retries=5):
     last_resp = None
     for attempt in range(max_retries):
@@ -406,149 +450,7 @@ def get_sheet_values(sheet_name: str):
 
     result = resp.json()
     return result.get("values", [])  # this is the list of rows
-def update_excel(new_df: pd.DataFrame) -> None:
-    """
-    Update Excel file with new data.
-    Automatically detects if it's a sales order or purchase order based on columns.
-    If it's a purchase order (has Reference column), matches with existing sales orders.
-    Numbering (#) restarts from 1 for every new batch of rows added.
-    """
-    with EXCEL_LOCK:
-        file_stream = None
-        wb = None
-        existing_df = pd.DataFrame()
 
-        try:
-            # --- Step 1: Download current file from OneDrive ---
-            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-
-            max_attempts = 6
-            for attempt in range(max_attempts):
-                try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
-                    resp.raise_for_status()
-                    file_stream = io.BytesIO(resp.content)
-                    wb = load_workbook(file_stream)
-
-                    if "მიმდინარე " in wb.sheetnames:
-                        ws = wb["მიმდინარე "]
-                        existing_df = pd.DataFrame(ws.values)
-                        existing_df.columns = existing_df.iloc[0]  # first row as header
-                        existing_df = existing_df[1:]              # drop header row
-                    else:
-                        existing_df = pd.DataFrame()
-                    break
-                except Exception as e:
-                    wait = min(5 * (attempt + 1), 30)
-                    print(f"⚠️ Error downloading file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
-                    time.sleep(wait)
-            else:
-                print("❌ Gave up downloading file after attempts")
-                return
-
-            # --- Step 2: Check if it's a purchase order ---
-            if new_df.get("Reference") is not None and new_df["Reference"].apply(
-                lambda x: any(r.strip() in set(existing_df.get("SO", [])) for r in str(x).split(",")) if pd.notna(x) else False
-            ).any():
-                # Purchase order logic...
-                purch_ref_to_rows = {}
-                for idx, row in new_df.iterrows():
-                    ref = row.get("Reference")
-                    if pd.notna(ref):
-                        refs = [r.strip() for r in re.split(r"[;,]", str(ref)) if r.strip()]
-                        for r in refs:
-                            purch_ref_to_rows.setdefault(r, []).append(idx)
-
-                updated_count = 0
-                for sales_idx, sales_row in existing_df.iterrows():
-                    so_value = sales_row.get("SO")
-                    sales_item = sales_row.get("Item")
-
-                    if pd.notna(so_value) and so_value in purch_ref_to_rows:
-                        for purch_idx in purch_ref_to_rows[so_value]:
-                            purch_item = new_df.at[purch_idx, "Item"]
-
-                            items_match = (
-                                (pd.isna(sales_item) and pd.notna(purch_item))
-                                or (pd.isna(purch_item) and pd.notna(sales_item))
-                                or (
-                                    pd.notna(sales_item)
-                                    and pd.notna(purch_item)
-                                    and str(sales_item).strip().lower() == str(purch_item).strip().lower()
-                                )
-                            )
-
-                            if items_match:
-                                for col in new_df.columns:
-                                    if col in existing_df.columns and col not in ["SO", "#"]:
-                                        sales_value = existing_df.at[sales_idx, col]
-                                        purch_value = new_df.at[purch_idx, col]
-                                        if col in ["შეკვეთის გაკეთების თარიღი", "Customer", "შეკვეთილი რაოდენობა"]:
-                                            if pd.notna(purch_value):
-                                                existing_df.at[sales_idx, col] = purch_value
-                                                updated_count += 1
-                                        else:
-                                            if (pd.isna(sales_value) or sales_value == "") and pd.notna(purch_value):
-                                                existing_df.at[sales_idx, col] = purch_value
-                                                updated_count += 1
-
-                # --- Step 3: Replace only the 'მიმდინარე ' sheet ---
-                ws = wb["მიმდინარე "]
-
-                # Write headers if needed
-                for col_idx, col_name in enumerate(existing_df.columns.tolist(), start=1):
-                    ws.cell(row=1, column=col_idx).value = col_name
-
-                # Write data values
-                for row_idx, row in enumerate(existing_df.values.tolist(), start=2):
-                    for col_idx, value in enumerate(row, start=1):
-                        ws.cell(row=row_idx, column=col_idx).value = value
-
-                # --- Step 4: Save workbook to memory ---
-                output = io.BytesIO()
-                wb.save(output)
-                output.seek(0)
-
-                # --- Step 5: Upload back with retry if locked ---
-                url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-                max_attempts = 10
-                for attempt in range(max_attempts):
-                    resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-
-                    if resp.status_code in (423, 409):  # Locked
-                        wait_time = min(30, 2**attempt) + random.uniform(0, 2)
-                        print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-                        time.sleep(wait_time)
-                        continue
-
-                    resp.raise_for_status()
-                    range_address = get_sheet_values("მიმდინარე ")
-                    table_name = create_table_if_not_exists(range_address,"მიმდინარე ")
-                    print(f"✅ Upload successful. Created table named {table_name}")
-                    return
-                else:
-                    raise RuntimeError("❌ Failed to upload: file remained locked after max retries.")
-            else:
-                append_dataframe_to_table(new_df, "მიმდინარე ")
-
-        except Exception as e:
-            print(f"❌ Fatal error: {e}")
-
-        finally:
-            if wb:
-                try:
-                    wb.close()
-                except Exception:
-                    pass
-            if file_stream:
-                try:
-                    file_stream.close()
-                except Exception:
-                    pass
-            del existing_df
-            del new_df
-            gc.collect()
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
         try:
@@ -688,137 +590,11 @@ def process_shipment(order_number: str) -> None:
             print(f"❌ Fatal error: {e}")
             import traceback
             traceback.print_exc()
-# ----------- MONDAY CHECKING -----------
-def fetch_recent_orders() -> list[dict]:
-    base_url = "https://www.zohoapis.com/inventory/v1"
-    result = []
-    for doc_type in DOC_TYPES:
-        url = f"{base_url}/{doc_type}"
-        headers = {
-            "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
-            "X-com-zoho-inventory-organizationid": ORG_ID
-        }
-        today = datetime.utcnow().date()
-        from_date = (today - timedelta(days=2)).isoformat()  # 3 days ago
-        to_date = today.isoformat()
-        params = {
-        "date_start": from_date,
-        "date_end": to_date
-        }
-        response = HTTP.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        orders = response.json().get(doc_type, [])
-        for order in orders:
-            order_id = order.get("purchaseorder_id") if doc_type == "purchaseorders" else order.get("salesorder_id")
-            order_number = order.get("purchaseorder_number") if doc_type == "purchaseorders" else order.get("salesorder_number")
-            order_status = order.get("status").lower()
-            if order_status == 'open' or order_status == 'approved' or order_status == 'issued':
-                result.append({
-                    "order_id": order_id,
-                    "order_number": order_number,
-                    "type": "purchaseorder" if doc_type == "purchaseorders" else "salesorder"
-                })
-    return result
-def monday_job():
-    """
-    Run with apscheduler: 
-    If today is Monday, fetch & process Saturday orders.
-    """
-    now = datetime.now()
-    if now.weekday() == 0: # Monday only
-        print("🔄 Checking for Saturday-created orders...")
-        orders = fetch_recent_orders()
-        if orders:
-            # --- Step 1: Download current file from OneDrive ---
-            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-            resp = HTTP.get(url_download, headers=headers)
-            resp.raise_for_status()
-            file_stream = io.BytesIO(resp.content)
-            wb = load_workbook(file_stream)
-            if "მიმდინარე " in wb.sheetnames:
-                ws = wb["მიმდინარე "]
-                existing_df = pd.DataFrame(ws.values)
-                existing_df.columns = existing_df.iloc[0]  # first row as header
-                existing_df = existing_df[1:]              # drop header row
-            else:
-                existing_df = pd.DataFrame()
-            for order in orders:
-                if order['type'] == "salesorder":
-                    if "SO" in existing_df.columns:
-                        existing_df = existing_df[existing_df["SO"] != order["order_number"]]
-                else:  # purchase order
-                    if "PO" in existing_df.columns:
-                        existing_df = existing_df[existing_df["PO"] != order["order_number"]]
-            # --- Step 4: Replace only the 'მიმდინარე ' sheet ---
-            ws = wb["მიმდინარე "]
-
-            # Write headers if needed
-            for col_idx, col_name in enumerate(existing_df.columns.tolist(), start=1):
-                ws.cell(row=1, column=col_idx).value = col_name
-
-            # Write data values
-            for row_idx, row in enumerate(existing_df.values.tolist(), start=2):
-                for col_idx, value in enumerate(row, start=1):
-                    ws.cell(row=row_idx, column=col_idx).value = value
-
-            # --- Step 5: Save workbook to memory ---
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
-
-            # --- Step 6: Upload back with retry if locked ---
-            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-
-            max_attempts = 10  # up to ~5 minutes wait
-            for attempt in range(max_attempts):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-
-                if resp.status_code in (423, 409):  # Locked
-                    wait_time = min(30, 2 ** attempt) + random.uniform(0, 2)
-                    print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-                    time.sleep(wait_time)
-                    continue
-
-                resp.raise_for_status()
-                range_address = get_used_range("მიმდინარე ")
-                table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
-                print(f"✅ Cleaned table {table_name}")
-            for order in orders:
-                if order['type'] == "salesorder":
-                    One_Drive_Auth()
-                    append_dataframe_to_table(get_sales_order_df(order['order_id']), "მიმდინარე ")
-                else:
-                    One_Drive_Auth()
-                    PO_df = get_purchase_order_df(order['order_id'])
-                    PO_df_copy = PO_df.copy()   # avoid referencing outer objects
-                    PO_df = None
-                    PO_future = POOL.submit(update_excel, PO_df_copy)
-        else:
-            print("ℹ️ No new Saturday orders found, skipping cleanup.")
-
 
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
 
-# ----------- SALES ORDER WEBHOOK -----------
-@app.route("/zoho/webhook/sales", methods=["POST"])
-def sales_webhook():
-    One_Drive_Auth()
-    # Check one - signaure
-    if not verify_zoho_signature(request, "salesorders"):
-        return "Invalid signature", 403
-    order_id = request.json.get("data", {}).get("salesorder_id")
-    # Check two - order_id
-    if not order_id:
-        return "Missing order ID", 400
-
-    try:
-        append_dataframe_to_table(get_sales_order_df(order_id), "მიმდინარე ")
-        return "OK", 200
-    except Exception as e:
-        return f"Processing error: {e}", 500
 
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
@@ -832,16 +608,12 @@ def purchase_webhook():
         order_id = request.json.get("data", {}).get("purchaseorders_id")
         if not order_id:
             return "Missing order ID", 400
+        try:
+            append_dataframe_to_table(get_purchase_order_df(order_id), "მიმდინარე ")
+            return "OK", 200
+        except Exception as e:
+            return f"Processing error: {e}", 500
 
-        df = get_purchase_order_df(order_id)
-
-        if df is not None and not df.empty:
-            POOL.submit(handle_excel_update, df.copy())
-            print(f"✅ Webhook processed successfully for order {order_id}")
-        else:
-            print(f"ℹ️ HACH order {order_id} processed (handled separately).")
-
-        return "OK", 200
 
     except Exception as e:
         print(f"❌ Webhook processing error: {e}")
@@ -1242,15 +1014,3 @@ def cleanup_subscriptions():
 @app.route("/health")
 def health():
     return {'health':'ok'}
-
-# ----------- SCHEDULERS -----------
-scheduler = BackgroundScheduler()
-scheduler.add_job(
-    monday_job,
-    "cron",
-    day_of_week="mon",
-    hour=10,
-    minute=5,
-    timezone=timezone("Asia/Tbilisi")  # UTC+4
-)
-scheduler.start()
