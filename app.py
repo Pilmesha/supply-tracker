@@ -1346,17 +1346,18 @@ def webhook():
                 except Exception:
                     print(f"Warning: Unexpected resource format: {resource}")
 
-                # Only process if sender is @hach.com
+            # --- Branch logic ---
+            if po_pattern.search(subject):
                 if "@hach.com" in sender_email:
-                    # 1️⃣ PO emails
-                    if po_pattern.search(subject):
-                        print(f"✅ PO pattern matched in {subject!r} from {sender_email} - scheduling process_hach_message")
-                        POOL.submit(process_hach_message, mailbox, message_id, message_date)
+                    print(f"✅ PO pattern from hach.com: scheduling process_hach_message")
+                    POOL.submit(process_hach_message, mailbox, message_id, message_date)
+                else:
+                    print(f"✅ PO pattern from other sender: scheduling process_message")
+                    POOL.submit(process_message, mailbox, message_id, message_date)
 
-                    # 2️⃣ Greenlight requests
-                    elif greenlight_pattern.search(subject):
-                        print(f"✅ Greenlight request matched in {subject!r} from {sender_email} - scheduling packing_list")
-                        POOL.submit(packing_list, mailbox, message_id, message_date)
+            elif greenlight_pattern.search(subject):
+                print(f"✅ Greenlight request matched: scheduling packing_list")
+                POOL.submit(packing_list, mailbox, message_id, message_date)
 
             return jsonify({"status": "accepted"}), 202
 
