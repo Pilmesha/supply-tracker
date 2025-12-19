@@ -37,6 +37,7 @@ DRIVE_ID = os.getenv('DRIVE_ID')
 FILE_ID = os.getenv('FILE_ID')
 PERMS_ID = os.getenv('PERMS_ID')
 HACH_FILE = os.getenv('HACH_FILE')
+HACH_HS = os.getenv('HACH_HS')
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN_EXPIRY = datetime.utcnow()
 ACCESS_TOKEN = None
@@ -661,6 +662,14 @@ def process_message(mailbox, message_id, message_date):
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
     print(f"message_date: {message_date}")
+    if isinstance(message_date, str):
+        dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+    elif isinstance(message_date, datetime):
+        dt = message_date
+    else:
+        print(f"⚠️ Unexpected message_date type: {type(message_date)}")
+        return
+    confirmation_date = dt.date() 
     with EXCEL_LOCK:
         file_stream = None
         wb = None
@@ -808,7 +817,10 @@ def process_message(mailbox, message_id, message_date):
         # Write data values
         for row_idx, row in enumerate(orders_df.values.tolist(), start=2):
             for col_idx, value in enumerate(row, start=1):
-                ws.cell(row=row_idx, column=col_idx).value = value
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.value = value
+                if orders_df.columns[col_idx - 1] == "Confirmation-ის მოსვლის თარიღი" and value:
+                    cell.number_format = "DD/MM/YYYY"
 
         # Save workbook to memory
         output = io.BytesIO()
@@ -834,6 +846,378 @@ def process_message(mailbox, message_id, message_date):
             file_stream = wb = None
             del orders_df
             gc.collect()
+            return
+def process_hach_message(mailbox, message_id, message_date):
+    print(f"📦 HACH processing | mailbox={mailbox}, message_id={message_id}")
+    if isinstance(message_date, str):
+        dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+    elif isinstance(message_date, datetime):
+        dt = message_date
+    else:
+        print(f"⚠️ Unexpected message_date type: {type(message_date)}")
+        return
+
+    confirmation_date = dt.date()  # <-- DATE ONLY
+
+    with EXCEL_LOCK:
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+        # --------------------------------------------------
+        # 1. Fetch message → subject (PO number)
+        # --------------------------------------------------
+        msg_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}"
+        msg_resp = HTTP.get(msg_url, headers=headers, timeout=20)
+        msg_resp.raise_for_status()
+        message = msg_resp.json()
+
+        subject = message.get("subject", "").strip()
+
+        po_match = re.search(r"\bPO-(\d+)\b", subject, re.IGNORECASE)
+        if not po_match:
+            print(f"❌ No PO number found in subject: {subject!r}")
+            return
+
+        sheet_name = str(int(po_match.group(1)))
+        print(f"📄 Target sheet extracted from subject: {sheet_name}")
+
+        # --------------------------------------------------
+        # 2. Download Excel files
+        # --------------------------------------------------
+        def download_excel(file_id):
+            url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{file_id}/content"
+            resp = HTTP.get(url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            return io.BytesIO(resp.content)
+
+        main_stream   = download_excel(HACH_FILE)
+        hs_stream     = download_excel(HACH_HS)
+        letter_stream = download_excel(PERMS_ID)
+
+        wb = load_workbook(main_stream)
+
+        if sheet_name not in wb.sheetnames:
+            print(f"❌ Sheet '{sheet_name}' not found")
+            return
+
+        ws = wb[sheet_name]
+
+        # --------------------------------------------------
+        # 3. Extract the ONLY table in the sheet
+        # --------------------------------------------------
+        tables = list(ws.tables.values())
+        if len(tables) != 1:
+            print(f"❌ Expected exactly 1 table, found {len(tables)}")
+            return
+
+        table = tables[0]
+        start_cell, end_cell = table.ref.split(":")
+        start_row = ws[start_cell].row
+        start_col = ws[start_cell].column
+        end_row   = ws[end_cell].row
+        end_col   = ws[end_cell].column
+
+        data = [
+            list(r) for r in ws.iter_rows(
+                min_row=start_row,
+                max_row=end_row,
+                min_col=start_col,
+                max_col=end_col,
+                values_only=True
+            )
+        ]
+
+        df = pd.DataFrame(data[1:], columns=data[0])
+        df["Code"] = df["Code"].astype(str).str.strip()
+
+        # --------------------------------------------------
+        # 4. Load HS & letter mappings
+        # --------------------------------------------------
+        hs_raw = pd.read_excel(
+        hs_stream,
+        sheet_name="Pricelist_neu",
+        header=0
+        )
+
+        # Excel A → index 0, Excel Y → index 24
+        hs_df = hs_raw.iloc[:, [0, 24]].copy()
+
+        hs_df.columns = ["Code", "HS Code"]
+
+        hs_df["Code"] = hs_df["Code"].astype(str).str.strip()
+        hs_df["HS Code"] = hs_df["HS Code"].astype(str).str.strip()
+
+        # Optional: remove trailing .0 if Excel numeric
+        hs_df["HS Code"] = hs_df["HS Code"].str.replace(r"\.0$", "", regex=True)
+
+        letter_df = pd.read_excel(letter_stream, header=1)
+        letter_stream.close()
+        letter_stream = None
+        if not {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(letter_df.columns):
+            print("⚠️ Warning: Permissions file missing required columns.")
+        else:
+            letter_df = letter_df[["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"]]
+
+        # --------------------------------------------------
+        # 5. Fetch and parse PDF
+        # --------------------------------------------------
+        att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+        att_resp = HTTP.get(att_url, headers=headers, timeout=20)
+        att_resp.raise_for_status()
+
+        pdfs = [
+            a for a in att_resp.json().get("value", [])
+            if a.get("name", "").lower().endswith(".pdf")
+        ]
+
+        if len(pdfs) != 1:
+            print(f"❌ Expected 1 PDF, found {len(pdfs)}")
+            return
+
+        content = base64.b64decode(pdfs[0]["contentBytes"])
+
+        pdf_text = ""
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                pdf_text += (page.extract_text() or "") + "\n"
+
+        # --------------------------------------------------
+        # 6. Update rows by Code
+        # --------------------------------------------------
+        updated = 0
+
+        for idx, row in df.iterrows():
+            code = row["Code"]
+
+            if not code or code not in pdf_text:
+                continue
+
+            # Confirmation date
+            df.at[idx, "Confirmation 1 (shipment week)"] = confirmation_date
+
+            # HS code
+            hs_row = hs_df[hs_df["Code"] == code]
+            if not hs_row.empty:
+                df.at[idx, "HS Code"] = hs_row.iloc[0]["HS Code"]
+
+            # Letter
+            print(f"   Searching permissions for code: '{code}'")
+            perm_row = letter_df[letter_df["მწარმოებლის კოდი"].astype(str).str.strip() == code]
+            
+            if not perm_row.empty:
+                num_perm = perm_row["მიღებული ნებართვა 1 / წერილის ნომერი"].iloc[0]
+                print(f"   📋 Permission number found: {num_perm}")
+                letter_df.at[idx, "წერილი"] = num_perm
+                updated_rows += 1
+                print(f"   ✅ SUCCESS: Filled წერილი with {num_perm}")
+            else:
+                df.at[idx, "წერილი"] = "არ სჭირდება"
+
+            updated += 1
+
+        if updated == 0:
+            print("⚠️ No codes from PDF matched table")
+            return
+
+        # --------------------------------------------------
+        # 7. Write table back to sheet
+        # --------------------------------------------------
+        for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
+            for c_idx, value in enumerate(row, start=start_col):
+                cell = ws.cell(row=r_idx, column=c_idx)
+                cell.value = value
+
+                if df.columns[c_idx - start_col] == "Confirmation 1 (shipment week)" and value:
+                    cell.number_format = "DD/MM/YYYY"
+
+        # --------------------------------------------------
+        # 8. Upload updated workbook
+        # --------------------------------------------------
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+
+        for attempt in range(8):
+            resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
+            if resp.status_code in (409, 423):
+                time.sleep(min(30, 2 ** attempt))
+                continue
+            resp.raise_for_status()
+            print(f"✅ HACH update successful ({updated} rows)")
+            return
+def packing_list(mailbox, message_id, message_date):
+    print(f"📦 Packing List processing | mailbox={mailbox}, message_id={message_id}")
+    with EXCEL_LOCK:
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+        # --- Step 1: Fetch message metadata ---
+        msg_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}"
+        msg_resp = HTTP.get(msg_url, headers=headers, timeout=20)
+        msg_resp.raise_for_status()
+        message = msg_resp.json()
+
+        subject = message.get("subject", "").strip()
+        # Extract K number from subject
+        k_match = re.search(r"K\d+", subject, re.IGNORECASE)
+        k_number = k_match.group(0) if k_match else None
+        if not k_number:
+            print(f"❌ No K number found in subject: {subject!r}")
+            return
+
+        # Normalize message_date to date only
+        if isinstance(message_date, str):
+            dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+        else:
+            dt = message_date
+
+        # Format dates as dd/mm/yyyy
+        confirmation_date_str = dt.strftime("%d/%m/%Y")
+        arrival_date_str = (dt + timedelta(weeks=3)).strftime("%d/%m/%Y")
+
+        # --- Step 2: Fetch attachments ---
+        att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+        att_resp = HTTP.get(att_url, headers=headers, timeout=20)
+        att_resp.raise_for_status()
+        attachments = att_resp.json().get("value", [])
+
+        pdf_attachments = [a for a in attachments if a['name'].lower().endswith(".pdf")]
+
+        if len(pdf_attachments) != 1:
+            print(f"❌ Expected 1 PDF, found {len(pdf_attachments)}")
+            return
+
+        pdf_content = base64.b64decode(pdf_attachments[0]['contentBytes'])
+
+        # --- Step 3: Extract PDF text ---
+        pdf_text = ""
+
+        with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
+            for page in pdf.pages:
+                # Sort chars top → y, then left → x
+                chars = sorted(page.chars, key=lambda c: (c['top'], c['x0']))
+                current_line = []
+                last_top = None
+                last_x = None
+                for c in chars:
+                    if last_top is None:
+                        current_line.append(c['text'])
+                        last_top = c['top']
+                        last_x = c['x1']
+                    else:
+                        # New line if vertical distance > threshold
+                        if abs(c['top'] - last_top) > 3:
+                            pdf_text += "".join(current_line) + "\n"
+                            current_line = [c['text']]
+                            last_top = c['top']
+                            last_x = c['x1']
+                        else:
+                            # Same line: add space if gap large
+                            if c['x0'] - last_x > 2:  # tweak if needed
+                                current_line.append(" ")
+                            current_line.append(c['text'])
+                            last_x = c['x1']
+                # Add last line
+                pdf_text += "".join(current_line) + "\n"
+        # --- Step 4: Extract PO number from PDF ---
+        po_match = re.search(r"PO-(\d+)", pdf_text)
+        if not po_match:
+            print("❌ No PO number found in PDF")
+            return
+        po_number_digits = str(int(po_match.group(1)))  # remove leading zeros
+        print(f"📄 Found PO: {po_number_digits}")
+
+        # --- Step 5: Open HACH Excel file ---
+        url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+        resp = HTTP.get(url_download, headers=headers, timeout=60)
+        resp.raise_for_status()
+        file_stream = io.BytesIO(resp.content)
+        wb = load_workbook(file_stream)
+
+        if po_number_digits not in wb.sheetnames:
+            print(f"❌ Sheet {po_number_digits} not found in HACH file")
+            return
+
+        ws = wb[po_number_digits]
+
+        # --- Step 6: Extract first table ---
+        tables = list(ws.tables.values())
+        if len(tables) == 0:
+            print(f"❌ No tables found in sheet {po_number_digits}")
+            return
+        table = tables[0]
+        start_cell, end_cell = table.ref.split(":")
+        start_row = ws[start_cell].row
+        start_col = ws[start_cell].column
+        end_row = ws[end_cell].row
+        end_col = ws[end_cell].column
+
+        # Read table into pandas
+        data = [
+            list(r) for r in ws.iter_rows(
+                min_row=start_row,
+                max_row=end_row,
+                min_col=start_col,
+                max_col=end_col,
+                values_only=True
+            )
+        ]
+        df = pd.DataFrame(data[1:], columns=data[0])
+        df["Code"] = df["Code"].astype(str).str.strip()
+
+        # Dictionary to store code -> quantity
+        code_quantity_map = {}
+
+        # Assuming df["Code"] contains the codes from Excel
+        for code in df["Code"]:
+            code_str = str(code).strip()
+            
+            # Pattern: code followed by optional spaces, then a number (integer or decimal, comma as decimal)
+            pattern = re.compile(rf"{re.escape(code_str)}\s+(\d+(?:[.,]\d+)?)")
+            
+            match = pattern.search(pdf_text)
+            if match:
+                qty_str = match.group(1).replace(",", ".")  # normalize decimal
+                try:
+                    quantity = float(qty_str)
+                except ValueError:
+                    quantity = None
+                code_quantity_map[code_str] = quantity
+            else:
+                code_quantity_map[code_str] = None
+        # --- Step 7: Fill required columns ---
+        updated = 0
+        for idx, row in df.iterrows():
+            code = str(row["Code"]).strip()
+            if code in pdf_text:
+                df.at[idx, "Packing List"] = k_number
+                df.at[idx, "რა რიცხვში გამოგზავნეს Packing List-ი"] = confirmation_date_str
+                df.at[idx, "ჩამოსვლის სავარაუდო თარიღი"] = arrival_date_str
+                df.at[idx, "რამდენი გამოიგზავნა"] = code_quantity_map[code]
+                updated += 1
+
+        if updated == 0:
+            print("⚠️ No codes from PDF matched the Excel table")
+            return
+
+        # --- Step 8: Write back to Excel ---
+        for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
+            for c_idx, value in enumerate(row, start=start_col):
+                ws.cell(row=r_idx, column=c_idx).value = value
+
+        # --- Step 9: Upload updated workbook ---
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+
+        for attempt in range(8):
+            resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
+            if resp.status_code in (409, 423):
+                time.sleep(min(30, 2 ** attempt))
+                continue
+            resp.raise_for_status()
+            print(f"✅ Packing List updated successfully ({updated} rows)")
             return
 def clear_all_subscriptions():
     headers = get_headers()
@@ -916,6 +1300,7 @@ def with_app_ctx_call(fn, *args, **kwargs):
     """Helper: call fn within app context (for background tasks)"""
     with app.app_context():
         return fn(*args, **kwargs)
+
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     # Validation: Graph sends GET with validationToken param
@@ -930,48 +1315,58 @@ def webhook():
         try:
             data = request.json or {}
             notifications = data.get('value', [])
-            #print(f"Webhook triggered with {len(notifications)} notifications")
 
-            # Pattern to match in email subjects (case-insensitive)
-            pattern = re.compile(r'(?i)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been (?:partially\s*)?received\b)')
+            # Patterns
+            po_pattern = re.compile(
+                r'(?i)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been (?:partially\s*)?received\b)'
+            )
+            greenlight_pattern = re.compile(r'^Greenlight request.*?/K\d+', re.IGNORECASE)
 
             for notification in notifications:
                 resource = notification.get('resource', '')
-                # fetch the message to get subject & id
                 message_url = f"{GRAPH_URL}/{resource}"
                 message_response = safe_request("get", message_url, headers=get_headers(), timeout=20)
+
                 if message_response.status_code != 200:
                     print(f"Error fetching message: {message_response.status_code} - {message_response.text}")
                     continue
+
                 message = message_response.json()
                 subject = message.get('subject', '')
-                if not re.search(r'(?i)\b(received|shipped)\b', subject):
-                    if pattern.search(subject):
-                        print(f"✅ Pattern matched in {subject!r} - scheduling processing")
-                        # parse mailbox robustly
-                        path_parts = resource.split('/')
-                        mailbox = None
-                        try:
-                            # resource typically: users/{user-id}/messages/{message-id}
-                            if len(path_parts) >= 4 and path_parts[0].lower() in ("users", "me"):
-                                mailbox = path_parts[1]
-                            else:
-                                mailbox = "unknown"
-                        except Exception:
-                            mailbox = "unknown"
-                            print(f"Warning: Unexpected resource format: {resource}")
+                sender_email = message.get('from', {}).get('emailAddress', {}).get('address', '').lower()
+                message_id = message.get('id')
+                message_date = message.get('receivedDateTime')
 
-                        message_id = message.get('id')
-                        message_date = message.get('receivedDateTime')
-                        # schedule heavy processing in thread pool
-                        POOL.submit(process_message, mailbox, message_id, message_date)
-            # return quickly so Graph knows we accepted the notifications
+                # parse mailbox robustly
+                path_parts = resource.split('/')
+                mailbox = "unknown"
+                try:
+                    if len(path_parts) >= 4 and path_parts[0].lower() in ("users", "me"):
+                        mailbox = path_parts[1]
+                except Exception:
+                    print(f"Warning: Unexpected resource format: {resource}")
+
+                # Only process if sender is @hach.com
+                if "@hach.com" in sender_email:
+                    # 1️⃣ PO emails
+                    if po_pattern.search(subject):
+                        print(f"✅ PO pattern matched in {subject!r} from {sender_email} - scheduling process_hach_message")
+                        POOL.submit(process_hach_message, mailbox, message_id, message_date)
+
+                    # 2️⃣ Greenlight requests
+                    elif greenlight_pattern.search(subject):
+                        print(f"✅ Greenlight request matched in {subject!r} from {sender_email} - scheduling packing_list")
+                        POOL.submit(packing_list, mailbox, message_id, message_date)
+
             return jsonify({"status": "accepted"}), 202
+
         except Exception as e:
             print(f"❌ Error processing webhook: {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
+
     else:
         return jsonify({"status": "active"}), 200
+
 def _initialize_subscriptions_worker(flask_app):
     """
     This wrapper ensures an app_context is present when initialize_subscriptions is run.
