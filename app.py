@@ -1006,8 +1006,7 @@ def process_hach_message(mailbox, message_id, message_date):
             if not perm_row.empty:
                 num_perm = perm_row["მიღებული ნებართვა 1 / წერილის ნომერი"].iloc[0]
                 print(f"   📋 Permission number found: {num_perm}")
-                letter_df.at[idx, "წერილი"] = num_perm
-                updated_rows += 1
+                df.at[idx, "წერილი"] = num_perm
                 print(f"   ✅ SUCCESS: Filled წერილი with {num_perm}")
             else:
                 df.at[idx, "წერილი"] = "არ სჭირდება"
