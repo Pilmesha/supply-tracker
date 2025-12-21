@@ -1296,7 +1296,8 @@ def process_hach_message(mailbox, message_id, message_date):
                 continue
 
             # Confirmation date
-            df.at[idx, "Confirmation 1 (shipment week)"] = confirmation_date
+            week_number = confirmation_date.isocalendar().week
+            df.at[idx, "Confirmation 1 (shipment week)"] = f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
 
             # HS code
             hs_row = hs_df[hs_df["Code"] == code]
@@ -1672,10 +1673,6 @@ def webhook():
         return jsonify({"status": "active"}), 200
 
 def _initialize_subscriptions_worker(flask_app):
-    """
-    This wrapper ensures an app_context is present when initialize_subscriptions is run.
-    Submit this wrapper to the ThreadPoolExecutor from a Flask request handler.
-    """
     with flask_app.app_context():
         try:
             initialize_subscriptions()
@@ -1684,7 +1681,6 @@ def _initialize_subscriptions_worker(flask_app):
 
 @app.route("/init", methods=["GET", "POST"])
 def init_subscriptions_endpoint():
-    """Manual endpoint to initialize subscriptions in background"""
     try:
         print("🔄 Starting subscription initialization in background...")
         # Submit worker that establishes app context itself.
