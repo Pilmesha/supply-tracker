@@ -142,6 +142,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Find SO numbers in reference
     so_numbers = re.findall(r"(?i)SO-\d+", reference)
     so_info_by_sku = {}
+    so_country = ""
     
     print(f"\nDebug: Reference = '{reference}'")
     print(f"Debug: Found SO numbers = {so_numbers}")
@@ -242,10 +243,10 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                     (f.get("value_formatted")
                     for f in item.get("item_custom_fields", [])
                     if f.get("label") == "Customer"),
-                    None
+                    ""
                 ),
             "SO": so_number,
-            "SO_Customer": so_data.get("SO_Customer") or "",
+            "SO_Customer": so_data.get("SO_Customer", ""),
             "SO_Match": is_match,
             "Export?": export_value
         }
