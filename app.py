@@ -218,6 +218,8 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         so_data = so_info_by_sku.get(sku, {})
 
         is_match = "Yes" if sku in so_info_by_sku else "No"
+        so_number = so_data.get("SO", "")
+
 
         export_value = ""
         if supplier == "HACH":
@@ -242,10 +244,8 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                     if f.get("label") == "Customer"),
                     None
                 ),
-            "SO": so_data.get("SO"),
-            "SO_Customer": so_data.get("SO_Customer"),
-            "SO_Date": so_data.get("SO_Date"),
-            "SO_Status": so_data.get("SO_Status"),
+            "SO": so_number,
+            "SO_Customer": so_data.get("SO_Customer") or "",
             "SO_Match": is_match,
             "Export?": export_value
         }
@@ -404,7 +404,6 @@ def graph_safe_request(method, url, headers, json=None, max_retries=5):
         raise RuntimeError("Graph request failed with no response returned.")
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
-    """Normalize and append a Pandas DataFrame to an Excel table using Graph API"""
     df = df[df['Supplier Company'] != 'HACH']
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
@@ -604,10 +603,277 @@ def process_shipment(order_number: str) -> None:
             import traceback
             traceback.print_exc()
 
+def update_hach_excel(po_number: str, items: list[dict]) -> None:
+
+    po_sheet = re.sub(r"\D", "", po_number).lstrip("00")
+    print(f"📄 HACH sheet name: {po_sheet}")
+    with EXCEL_LOCK:
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+        url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+        resp = HTTP.get(url_download, headers=headers, timeout=60)
+        resp.raise_for_status()
+        file_stream = io.BytesIO(resp.content)
+        wb = load_workbook(file_stream)
+        
+        if po_sheet not in wb.sheetnames:
+            raise ValueError(f"Sheet '{po_sheet}' not found in HACH file")
+
+        ws = wb[po_sheet]
+
+        # --- Get first table ---
+        if not ws.tables:
+            raise ValueError(f"No tables found in sheet '{po_sheet}'")
+        tables = list(ws.tables.values())
+        table = tables[0]
+        start_cell, end_cell = table.ref.split(":")
+        start_row = ws[start_cell].row
+        start_col = ws[start_cell].column
+        end_row = ws[end_cell].row
+        end_col = ws[end_cell].column
+
+        print(f"📊 Using table {table.name} ({table.ref})")
+
+        # --- Read table into pandas ---
+        data = [
+        list(r) for r in ws.iter_rows(
+            min_row=start_row,
+            max_row=end_row,
+            min_col=start_col,
+            max_col=end_col,
+            values_only=True
+        )
+        ]
+
+        df = pd.DataFrame(data[1:], columns=data[0])
+
+        # Normalize Details column
+        if "Details" not in df.columns or "Qty Delivered" not in df.columns:
+            print("❌ Required columns not found (Details / Qty Delivered)")
+            return
+
+        df["Details"] = df["Details"].astype(str).str.strip()
+
+        pr_items = []
+
+        for item in items:
+            name = str(item.get("name")).strip()
+            if not name:
+                continue
+
+            qty = item.get("quantity") or 0
+            try:
+                qty = float(qty)
+            except (TypeError, ValueError):
+                qty = 0
+
+            pr_items.append({
+                "name": name,
+                "quantity": qty,
+                "used": False
+            })
+
+        print("📦 Purchase Receive items (ordered):")
+        for i in pr_items:
+            print(f"   {i['name']} → {i['quantity']}")
+
+        # --- Fill Qty Delivered based on Details / item_name ---
+        updated = 0
+        for idx, row in df.iterrows():
+            details_norm = str(row["Details"]).strip()
+
+            # find first unused PR item with same name
+            for pr in pr_items:
+                if not pr["used"] and pr["name"] == details_norm:
+                    df.at[idx, "Qty Delivered"] = pr["quantity"]
+                    pr["used"] = True
+                    updated += 1
+                    print(f"   ✔ {row['Details']} → {pr['quantity']}")
+                    break
+
+        if updated == 0:
+            print("⚠️ No items matched Excel Details column")
+            return
+
+        # --- Write back to Excel ---
+        for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
+            for c_idx, value in enumerate(row, start=start_col):
+                ws.cell(row=r_idx, column=c_idx).value = value
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+
+        for attempt in range(8):
+            resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
+            if resp.status_code in (409, 423):
+                time.sleep(min(30, 2 ** attempt))
+                continue
+            resp.raise_for_status()
+            print(f"✅ Packing List updated successfully ({updated} rows)")
+            return
+
+def update_nonhach_excel(po_number: str, line_items: list[dict]) -> None:
+    with EXCEL_LOCK:
+        file_stream = None
+        wb = None
+
+        try:
+            # --- Step 0: Build PR items (ORDER PRESERVING) ---
+            po_str = str(po_number).strip()
+            pr_items = []
+
+            for item in line_items:
+                name = item.get("name")
+                qty = item.get("quantity")
+
+                if not name:
+                    continue
+
+                try:
+                    qty = float(qty)
+                except (TypeError, ValueError):
+                    qty = 0
+
+                pr_items.append({
+                    "po": po_str,
+                    "name": str(name).strip().lower(),
+                    "quantity": qty,
+                    "used": False
+                })
+
+            if not pr_items:
+                print("⚠️ No valid PR items to process")
+                return
+
+            print("📦 Incoming Purchase Receive items:")
+            for p in pr_items:
+                print(f"   {p['po']} | {p['name']} → {p['quantity']}")
+
+            # --- Step 1: Download Excel ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+            for attempt in range(6):
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    wb = load_workbook(file_stream)
+                    break
+                except Exception as e:
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ Download failed ({attempt+1}/6): {e}, retrying in {wait}s")
+                    time.sleep(wait)
+            else:
+                print("❌ Failed to download Excel")
+                return
+
+            # --- Step 2: Choose target sheet based on PO ---
+            target_sheet = None
+            target_df = None
+
+            for sheet_name in ("მიმდინარე ", "ჩამოსული"):
+                if sheet_name not in wb.sheetnames:
+                    continue
+
+                ws = wb[sheet_name]
+                df = pd.DataFrame(ws.values)
+                df.columns = df.iloc[0]
+                df = df[1:]
+
+                if "PO" not in df.columns or "Item" not in df.columns:
+                    continue
+
+                df["PO"] = df["PO"].astype(str).str.strip()
+
+                if (df["PO"] == po_str).any():
+                    target_sheet = sheet_name
+                    target_df = df
+                    print(f"📄 Using sheet '{sheet_name}'")
+                    break
+
+            if target_sheet is None:
+                print(f"⚠️ PO {po_str} not found in any sheet")
+                return
+
+            ws = wb[target_sheet]
+
+            # --- Step 3: Validate & normalize ---
+            required_cols = {"PO", "Item", "რეალურად გამოგზავნილი რაოდენობა"}
+            if not required_cols.issubset(target_df.columns):
+                raise ValueError(f"Missing required columns in '{target_sheet}'")
+
+            target_df["Item"] = (
+                target_df["Item"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+
+            # --- Step 4: Order-preserving fill ---
+            updated = 0
+
+            for idx, row in target_df.iterrows():
+                for pr in pr_items:
+                    if (
+                        not pr["used"]
+                        and row["PO"] == pr["po"]
+                        and row["Item"] == pr["name"]
+                    ):
+                        target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = pr["quantity"]
+                        pr["used"] = True
+                        updated += 1
+                        print(f"   ✔ {row['Item']} → {pr['quantity']}")
+                        break
+
+            if updated == 0:
+                print("⚠️ No rows updated")
+                return
+
+            print(f"✅ Updated {updated} rows in '{target_sheet}'")
+
+            # --- Step 5: Write back to Excel ---
+            for col_idx, col_name in enumerate(target_df.columns, start=1):
+                ws.cell(row=1, column=col_idx).value = col_name
+
+            for row_idx, row in enumerate(target_df.values.tolist(), start=2):
+                for col_idx, value in enumerate(row, start=1):
+                    ws.cell(row=row_idx, column=col_idx).value = value
+
+            # --- Step 6: Save & upload ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+
+            for attempt in range(10):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                if resp.status_code in (423, 409):
+                    wait = min(30, 2 ** attempt)
+                    print(f"⚠️ File locked, retrying in {wait}s")
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                print("✅ Excel upload successful")
+                return
+
+            raise RuntimeError("Upload failed after retries")
+
+        except Exception as e:
+            print(f"❌ Fatal error: {e}")
+
+        finally:
+            if wb:
+                wb.close()
+            if file_stream:
+                file_stream.close()
+            gc.collect()
+
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
-
 
 # ----------- PURCHASE ORDER WEBHOOK -----------
 @app.route("/zoho/webhook/purchase", methods=["POST"])
@@ -633,10 +899,48 @@ def purchase_webhook():
         import traceback
         traceback.print_exc()
         return f"Processing error: {e}", 500
+@app.route("/zoho/webhook/receive", methods=["POST"])
+def receive_webhook():
+    try:
+        One_Drive_Auth()
+        if not verify_zoho_signature(request, "purchasereceive"):
+            print("❌ Signature verification failed")
+            return "Invalid signature", 403
+        payload = request.json or {}
+        data = payload.get("data", {})
+        receive_id = data.get("purchase_receive_id")
+        if not receive_id:
+            print("❌ purchase_receive_id missing from payload")
+            return "Missing purchase_receive_id", 400
+        url = f"https://www.zohoapis.com/inventory/v1/purchasereceives/{receive_id}"
+        headers = {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
 
+        receive = response.json().get("purchasereceive", {})
+        # --- Extract line items ---
+        items = receive.get("line_items", [])
+        if not items:
+            print("⚠️ No line items found")
+        vendor_name = receive.get("vendor_name").upper()
+        vendor_name = receive.get("vendor_name", "").upper()
+        if vendor_name == "HACH":
+            print("🏭 HACH vendor detected")
+            POOL.submit(update_hach_excel, receive.get("purchaseorder_number"),receive.get("line_items", []))
+        else:
+            POOL.submit(update_nonhach_excel, receive.get("purchaseorder_number"),receive.get("line_items", []))
+        return "OK", 200
+
+    except Exception as e:
+        print(f"❌ Webhook processing error: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"Processing error: {e}", 500
 # ----------- DELIVERED ORDER WEBHOOK -----------
 @app.route('/zoho/webhook/delivered', methods=['POST'])
-def handle_delivery():
+def delivered_webhook():
     One_Drive_Auth()
     if not verify_zoho_signature(request, "shipmentorders"):
             return "Invalid signature", 403
