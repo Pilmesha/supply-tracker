@@ -126,7 +126,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
         "X-com-zoho-inventory-organizationid": ORG_ID
     }
-
+    
     response = HTTP.get(url, headers=headers)
     response.raise_for_status()
     po = response.json().get("purchaseorder", {})
@@ -139,8 +139,8 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     if reference:
         reference = reference.strip("()").strip().rstrip(",")
     
-    # Find SO numbers in reference
-    so_numbers = re.findall(r"(?i)SO-\d+", reference)
+    # Find SO numbers in reference (but proceed even if none found)
+    so_numbers = re.findall(r"(?i)SO-\d+", reference) if reference else []
     so_info_by_sku = {}
     so_country = ""
     
@@ -152,7 +152,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         for so_num in so_numbers:
             so_num = so_num.upper()
             print(f"\nDebug: Fetching SO {so_num}")
-            
             try:
                 # First get the sales order to get its ID
                 search_response = HTTP.get(
@@ -162,7 +161,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                 )
                 search_data = search_response.json()
                 salesorders = search_data.get("salesorders", [])
-                
                 print(f"Debug: Found {len(salesorders)} sales orders")
                 
                 for so in salesorders:
@@ -174,12 +172,12 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         so_detail_url = f"https://www.zohoapis.com/inventory/v1/salesorders/{salesorder_id}"
                         so_response = HTTP.get(so_detail_url, headers=headers)
                         so_response.raise_for_status()
-                        
                         so_detail = so_response.json().get("salesorder", {})
                         line_items = so_detail.get("line_items", [])
                         
                         print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
                         
+                        # Process ALL line items - NO break here
                         for item in line_items:
                             sku = item.get("sku")
                             item_name = item.get("name")
@@ -195,7 +193,16 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     "SO_Item_Quantity": item.get("quantity"),
                                     "SO_Country": so_detail.get("country")
                                 }
-                        break
+                        # Get SO country for export logic
+                        so_country = (
+                            so_detail.get("shipping_address", {}).get("country") or 
+                            so_detail.get("billing_address", {}).get("country") or 
+                            so_detail.get("country") or 
+                            ""
+                        )
+                        print(f"Debug: SO country detected = '{so_country}'")
+                        break  # Break only after processing this SO
+                        
             except Exception as e:
                 print(f"Debug: Error fetching SO {so_num}: {e}")
                 continue
@@ -203,33 +210,27 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Debug: Print PO items
     print(f"\nDebug: PO {po_number} has {len(po.get('line_items', []))} items")
     for idx, item in enumerate(po.get("line_items", []), 1):
-        print(f"Debug: PO Item {idx} - Name: {item.get('name')}, SKU: {item.get('sku')}")
-    so_country = (
-    so_detail.get("shipping_address", {}).get("country")
-    or so_detail.get("billing_address", {}).get("country")
-    or ""
-    )
-
-    print(f"Debug: SO country detected = '{so_country}'")
-    # Create DataFrame
+        sku = item.get("sku")
+        matched = "Yes" if sku in so_info_by_sku else "No"
+        print(f"Debug: PO Item {idx} - Name: {item.get('name')}, SKU: {sku}, Matched: {matched}")
+    
+    # Create DataFrame - ALWAYS create for every PO
     items = []
-
     for item in po.get("line_items", []):
         sku = item.get("sku")
         so_data = so_info_by_sku.get(sku, {})
-
         is_match = "Yes" if sku in so_info_by_sku else "No"
         so_number = so_data.get("SO", "")
-
-
+        
+        # Export logic for HACH
         export_value = ""
         if supplier == "HACH":
-            country_lc = so_country.lower()
+            country_lc = so_country.lower() if so_country else ""
             if "azerbaijan" in country_lc or "armenia" in country_lc:
                 export_value = "კი"
             else:
                 export_value = "არა"
-
+        
         item_dict = {
             "Supplier Company": supplier,
             "PO": po_number,
@@ -238,19 +239,15 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             "Code": sku,
             "Reference": reference,
             "შეკვეთილი რაოდენობა": item.get("quantity"),
-            "Customer": so_data.get("SO_Customer") or
-                next(
-                    (f.get("value_formatted")
-                    for f in item.get("item_custom_fields", [])
-                    if f.get("label") == "Customer"),
-                    ""
-                ),
+            "Customer": so_data.get("SO_Customer") or next(
+                (f.get("value_formatted") for f in item.get("item_custom_fields", []) if f.get("label") == "Customer"),
+                ""
+            ),
             "SO": so_number,
             "SO_Customer": so_data.get("SO_Customer", ""),
             "SO_Match": is_match,
             "Export?": export_value
         }
-
         items.append(item_dict)
     
     df = pd.DataFrame(items)
@@ -259,9 +256,11 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     matches = df[df['SO_Match'] == 'Yes']
     print(f"SOs in reference: {', '.join(so_numbers) if so_numbers else 'None'}")
     print(f"Items matched: {len(matches)}/{len(df)}")
+    # Process HACH but still return DataFrame
     if supplier == "HACH":
         process_hach(df)
-        return None
+    
+    # ALWAYS return the DataFrame
     return df
 # ----------- HELPER FUNCS FOR EXCEL -----------
 def get_used_range(sheet_name: str):
