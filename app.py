@@ -358,14 +358,69 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
         "Qty Delivered", "Customer", "Export?", "მდებარეობა", "შენიშვნა"
     ]
 
-    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer', 'Export?']]
+    # --- Base shaping ---
+    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer']].copy()
     df = df.rename(columns={"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"})
     df["Item"] = df.index + 1
 
+    # --- Download reference files ---
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+    def download_excel(file_id):
+        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{file_id}/content"
+        resp = HTTP.get(url, headers=headers, timeout=60)
+        resp.raise_for_status()
+        return io.BytesIO(resp.content)
+
+    hs_stream     = download_excel(HACH_HS)
+    letter_stream = download_excel(PERMS_ID)
+
+    # --- HS codes ---
+    hs_raw = pd.read_excel(hs_stream, sheet_name="Pricelist_neu", header=0)
+    hs_df = hs_raw.iloc[:, [0, 24]].copy()
+    hs_df.columns = ["Code", "HS Code"]
+
+    hs_df["Code"] = hs_df["Code"].astype(str).str.strip()
+    hs_df["HS Code"] = (
+        hs_df["HS Code"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+    # --- Permissions ---
+    letter_df = pd.read_excel(letter_stream, header=1)
+    letter_stream.close()
+
+    if {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(letter_df.columns):
+        letter_df = letter_df[
+            ["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"]
+        ]
+        letter_df["მწარმოებლის კოდი"] = (
+            letter_df["მწარმოებლის კოდი"].astype(str).str.strip()
+        )
+    else:
+        letter_df = pd.DataFrame(columns=["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"])
+    # --- Ensure all target columns exist ---
     for col in table_cols:
         if col not in df.columns:
             df[col] = ""
-
+    # --- Normalize Code once ---
+    df["Code"] = df["Code"].astype(str).str.strip()
+    # --- Build lookups ---
+    hs_lookup = (
+        hs_df
+        .drop_duplicates(subset="Code")
+        .set_index("Code")["HS Code"]
+    )
+    perm_lookup = (
+        letter_df
+        .drop_duplicates(subset="მწარმოებლის კოდი")
+        .set_index("მწარმოებლის კოდი")["მიღებული ნებართვა 1 / წერილის ნომერი"]
+    )
+    # --- Fill EXISTING columns only ---
+    df["HS Code"] = df["Code"].map(hs_lookup)
+    df["წერილი"] = df["Code"].map(perm_lookup).fillna("არ სჭირდება")
+    # --- Final column order ---
     df = df[table_cols]
     return df.fillna("").astype(str)
 def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
@@ -1068,11 +1123,9 @@ def process_message(mailbox, message_id, message_date):
         file_stream = None
         wb = None
         orders_df = pd.DataFrame()
-        perms_df = pd.DataFrame()
 
         # --- Step 1: Download current orders Excel file ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        perms_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{PERMS_ID}/content"
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
         max_attempts = 6
@@ -1092,24 +1145,6 @@ def process_message(mailbox, message_id, message_date):
                 else:
                     print("⚠️ Worksheet 'მიმდინარე ' not found in orders file.")
                     orders_df = pd.DataFrame()
-
-                # --- Download permissions Excel file ---
-                try:
-                    resp_perms = HTTP.get(perms_download, headers=headers, timeout=60)
-                    resp_perms.raise_for_status()
-                    perms_stream = io.BytesIO(resp_perms.content)
-                    perms_df = pd.read_excel(perms_stream, header=1)
-                    perms_stream.close()
-                    perms_stream = None
-                    if not {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(perms_df.columns):
-                        print("⚠️ Warning: Permissions file missing required columns.")
-                    else:
-                        perms_df = perms_df[["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"]]
-
-                except Exception as e_perm:
-                    print(f"⚠️ Could not download permissions Excel: {e_perm}")
-                    perms_df = pd.DataFrame(columns=["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"])
-
                 break  # success — exit retry loop
 
             except Exception as e:
@@ -1120,8 +1155,6 @@ def process_message(mailbox, message_id, message_date):
         else:
             print("❌ Gave up downloading files after multiple attempts")
             return
-
-        items_df = pd.read_csv("zoho_items.csv")
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
         att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
         if att_resp.status_code != 200:
@@ -1260,10 +1293,7 @@ def process_hach_message(mailbox, message_id, message_date):
             resp = HTTP.get(url, headers=headers, timeout=60)
             resp.raise_for_status()
             return io.BytesIO(resp.content)
-
         main_stream   = download_excel(HACH_FILE)
-        hs_stream     = download_excel(HACH_HS)
-        letter_stream = download_excel(PERMS_ID)
 
         wb = load_workbook(main_stream)
 
@@ -1302,34 +1332,6 @@ def process_hach_message(mailbox, message_id, message_date):
         df["Code"] = df["Code"].astype(str).str.strip()
 
         # --------------------------------------------------
-        # 4. Load HS & letter mappings
-        # --------------------------------------------------
-        hs_raw = pd.read_excel(
-        hs_stream,
-        sheet_name="Pricelist_neu",
-        header=0
-        )
-
-        # Excel A → index 0, Excel Y → index 24
-        hs_df = hs_raw.iloc[:, [0, 24]].copy()
-
-        hs_df.columns = ["Code", "HS Code"]
-
-        hs_df["Code"] = hs_df["Code"].astype(str).str.strip()
-        hs_df["HS Code"] = hs_df["HS Code"].astype(str).str.strip()
-
-        # Optional: remove trailing .0 if Excel numeric
-        hs_df["HS Code"] = hs_df["HS Code"].str.replace(r"\.0$", "", regex=True)
-
-        letter_df = pd.read_excel(letter_stream, header=1)
-        letter_stream.close()
-        letter_stream = None
-        if not {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(letter_df.columns):
-            print("⚠️ Warning: Permissions file missing required columns.")
-        else:
-            letter_df = letter_df[["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"]]
-
-        # --------------------------------------------------
         # 5. Fetch and parse PDF
         # --------------------------------------------------
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
@@ -1366,23 +1368,6 @@ def process_hach_message(mailbox, message_id, message_date):
             # Confirmation date
             week_number = confirmation_date.isocalendar().week
             df.at[idx, "Confirmation 1 (shipment week)"] = f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
-
-            # HS code
-            hs_row = hs_df[hs_df["Code"] == code]
-            if not hs_row.empty:
-                df.at[idx, "HS Code"] = hs_row.iloc[0]["HS Code"]
-
-            # Letter
-            print(f"   Searching permissions for code: '{code}'")
-            perm_row = letter_df[letter_df["მწარმოებლის კოდი"].astype(str).str.strip() == code]
-            
-            if not perm_row.empty:
-                num_perm = perm_row["მიღებული ნებართვა 1 / წერილის ნომერი"].iloc[0]
-                print(f"   📋 Permission number found: {num_perm}")
-                df.at[idx, "წერილი"] = num_perm
-                print(f"   ✅ SUCCESS: Filled წერილი with {num_perm}")
-            else:
-                df.at[idx, "წერილი"] = "არ სჭირდება"
 
             updated += 1
 
