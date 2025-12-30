@@ -436,6 +436,40 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     df = df[df['Supplier Company'] != 'HACH']
     if df.empty:
         raise ValueError("❌ DataFrame is empty. Nothing to append.")
+    perms_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{PERMS_ID}/content"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+    max_attempts = 6
+    for attempt in range(max_attempts):
+        try:
+            # --- Download permissions Excel file ---
+            try:
+                resp_perms = HTTP.get(perms_download, headers=headers, timeout=60)
+                resp_perms.raise_for_status()
+                perms_stream = io.BytesIO(resp_perms.content)
+                perms_df = pd.read_excel(perms_stream, header=1)
+                perms_stream.close()
+                perms_stream = None
+                if not {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(perms_df.columns):
+                    print("⚠️ Warning: Permissions file missing required columns.")
+                else:
+                    perms_df = perms_df[["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"]]
+
+            except Exception as e_perm:
+                print(f"⚠️ Could not download permissions Excel: {e_perm}")
+                perms_df = pd.DataFrame(columns=["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"])
+
+            break  # success — exit retry loop
+
+        except Exception as e:
+            wait = min(5 * (attempt + 1), 30)
+            print(f"⚠️ Error downloading main file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+            time.sleep(wait)
+    else:
+        print("❌ Gave up downloading files after multiple attempts")
+        return
+
+    items_df = pd.read_csv("zoho_items.csv")
     # Ensure table exists
     range_address = get_used_range(sheet_name)
     table_name = create_table_if_not_exists(range_address, sheet_name)
@@ -463,8 +497,35 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
     # ✅ Restrict to table columns only
     out_df = new_df[table_columns]
+    out_df["Code"] = out_df["Code"].astype(str).str.strip()
 
-    # Convert DataFrame → list of lists
+    items_df["sku"] = items_df["sku"].astype(str).str.strip()
+    perms_df["მწარმოებლის კოდი"] = perms_df["მწარმოებლის კოდი"].astype(str).str.strip()
+
+    # HS Code lookup: sku -> HS_Code
+    hs_lookup = (
+        items_df
+        .drop_duplicates(subset="sku")
+        .set_index("sku")["HS_Code"]
+    )
+    # Permission lookup: code -> letter
+    perm_lookup = (
+        perms_df
+        .drop_duplicates(subset="მწარმოებლის კოდი")
+        .set_index("მწარმოებლის კოდი")["მიღებული ნებართვა 1 / წერილის ნომერი"]
+    )
+    # Fill HS Code
+    out_df["HS Code"] = out_df["Code"].map(hs_lookup)
+
+    # Fill permissions
+    out_df["წერილი"] = (
+        out_df["Code"]
+        .map(perm_lookup)
+        .fillna("არ სჭირდება")
+    )
+    # --------------------------------------------------
+    # 3️⃣ Final export
+    # --------------------------------------------------
     rows = out_df.fillna("").astype(str).values.tolist()
 
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
@@ -1111,32 +1172,10 @@ def process_message(mailbox, message_id, message_date):
                 if code and code in all_text:
                     print(f"✅ Match found for code {code} in PDF")
 
-                    # Fill HS Code if missing
-                    hs_row = items_df[items_df["sku"] == code]
-                    hs_code = hs_row["HS_Code"].iloc[0] if not hs_row.empty else None
-
-                    if pd.isna(orders_df.at[idx, "HS Code"]) or orders_df.at[idx, "HS Code"] == "":
-                        orders_df.at[idx, "HS Code"] = hs_code
-                        print("   Filled HS code")
-
                     # Fill confirmation date
                     if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
                         orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = message_date
                         print("   Filled confirmation date")
-
-                    # --- Filling წერილი ---
-                    print(f"   Searching permissions for code: '{code}'")
-                    perm_row = perms_df[perms_df["მწარმოებლის კოდი"].astype(str).str.strip() == code]
-                    
-                    if not perm_row.empty:
-                        num_perm = perm_row["მიღებული ნებართვა 1 / წერილის ნომერი"].iloc[0]
-                        print(f"   📋 Permission number found: {num_perm}")
-                        orders_df.at[idx, "წერილი"] = num_perm
-                        updated_rows += 1
-                        print(f"   ✅ SUCCESS: Filled წერილი with {num_perm}")
-                    else:
-                        orders_df.at[idx, "წერილი"] = "არ სჭირდება"
-
             if updated_rows == 0:
                 print("⚠️ No matching item codes found in this confirmation message.")
 
