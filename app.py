@@ -748,7 +748,7 @@ def process_shipment(order_number: str) -> None:
             import traceback
             traceback.print_exc()
 
-def update_hach_excel(po_number: str, items: list[dict]) -> None:
+def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
 
     po_sheet = re.sub(r"\D", "", po_number).lstrip("00")
     print(f"📄 HACH sheet name: {po_sheet}")
@@ -790,7 +790,7 @@ def update_hach_excel(po_number: str, items: list[dict]) -> None:
         ]
 
         df = pd.DataFrame(data[1:], columns=data[0])
-
+        df["რეალური ჩამოსვლის თარიღი"] = (pd.to_datetime(date) - pd.Timedelta(days=2)).date()
         # Normalize Details column
         if "Details" not in df.columns or "Qty Delivered" not in df.columns:
             print("❌ Required columns not found (Details / Qty Delivered)")
@@ -857,7 +857,7 @@ def update_hach_excel(po_number: str, items: list[dict]) -> None:
             print(f"✅ Packing List updated successfully ({updated} rows)")
             return
 
-def update_nonhach_excel(po_number: str, line_items: list[dict]) -> None:
+def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> None:
     with EXCEL_LOCK:
         file_stream = None
         wb = None
@@ -954,7 +954,8 @@ def update_nonhach_excel(po_number: str, line_items: list[dict]) -> None:
                 .str.strip()
                 .str.lower()
             )
-
+            po_mask = target_df["PO"] == po_str
+            target_df.loc[po_mask, "ჩამოსვლის თარიღი"] = (pd.to_datetime(date) - pd.Timedelta(days=2)).date()
             # --- Step 4: Order-preserving fill ---
             updated = 0
 
@@ -1073,9 +1074,9 @@ def receive_webhook():
         vendor_name = receive.get("vendor_name", "").upper()
         if vendor_name == "HACH":
             print("🏭 HACH vendor detected")
-            POOL.submit(update_hach_excel, receive.get("purchaseorder_number"),receive.get("line_items", []))
+            POOL.submit(update_hach_excel, receive.get("purchaseorder_number"), receive.get("date"),receive.get("line_items", []))
         else:
-            POOL.submit(update_nonhach_excel, receive.get("purchaseorder_number"),receive.get("line_items", []))
+            POOL.submit(update_nonhach_excel, receive.get("purchaseorder_number"), receive.get("date"), receive.get("line_items", []))
         return "OK", 200
 
     except Exception as e:
