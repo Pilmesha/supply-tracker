@@ -67,22 +67,23 @@ def refresh_access_token()-> str:
     return ACCESS_TOKEN
 def verify_zoho_signature(request, expected_module):
     # Select secret based on webhook type
-    if expected_module == "purchaseorders":
-        secret_key = os.getenv("PURCHASE_WEBHOOK_SECRET")
-    elif expected_module == "purchasereceive":
-        secret_key = os.getenv("RECEIVE_WEBHOOK_SECRET")
-    else:
-        secret_key = os.getenv("SHIPMENT_WEBHOOK_SECRET")
+    secret_key = (
+    os.getenv("PURCHASE_WEBHOOK_SECRET")
+    if expected_module == "purchaseorders"
+    else os.getenv("RECEIVE_WEBHOOK_SECRET")
+    if expected_module == "purchasereceive"
+    else os.getenv("INVOICE_WEBHOOK_SECRET")
+    if expected_module == "invoice"
+    else os.getenv("SHIPMENT_WEBHOOK_SECRET")
     
-    if not secret_key:
-        return False
+    ).encode("utf-8")
     
     received_sign = request.headers.get('X-Zoho-Webhook-Signature')
-    if not received_sign:
+    if not received_sign or not secret_key:
         return False
     
     expected_sign = hmac.new(
-        secret_key.encode('utf-8'),
+        secret_key,
         request.get_data(),
         hashlib.sha256
     ).hexdigest()
@@ -1017,6 +1018,11 @@ def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> No
                 file_stream.close()
             gc.collect()
 
+def handle_hach_invoice(so_numer: str, date: str)-> None:
+    print(f'handling hach with {so_numer}, dated {date}')
+def handle_non_hach_invoice(so_numer: str, date:str)-> None:
+    print(f'handling non-hach with {so_numer}, dated {date}')
+
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
@@ -1101,7 +1107,30 @@ def delivered_webhook():
     except Exception as e:
         
         return f"Processing error: {e}", 500
+@app.route("/zoho/webhook/invoice", methods=["POST"])
+def invoice_webhook():
+    One_Drive_Auth()
 
+    if not verify_zoho_signature(request, "invoice"):
+        print("❌ Signature verification failed")
+        return "Invalid signature", 403
+
+    # --- Parse payload safely ---
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = request.form.to_dict()
+
+    data = payload.get("data", payload)
+
+    print(f"📨 Invoice received | Customer: {data.get('customer')}")
+
+    # --- Route by customer ---
+    if data.get("customer") == "HACH":
+        print("🏭 HACH vendor detected")
+        POOL.submit(handle_hach_invoice, data.get("sales_order_number"), data.get("date"))
+    else:
+        POOL.submit(handle_non_hach_invoice, data.get("sales_order_number"), data.get("date"))
+    return "OK", 200
 # -----------MAIL WEBHOOK -----------
 def safe_request(method, url, **kwargs):
     """Wrapper to apply a default timeout and route through our retrying session."""
