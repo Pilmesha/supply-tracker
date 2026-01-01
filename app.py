@@ -1200,7 +1200,7 @@ def handle_hach_bill(po_number: str, date: str):
             df[deadline_col] = deadline_date.strftime("%d/%m/%y")
 
             print(f"📅 Base date: {base_date.strftime('%d/%m/%Y')}")
-            print(f"📅 Deadline (+100 days): {deadline_date.strftime("%d/%m/%y")}")
+            print(f"📅 Deadline (+100 days): {deadline_date.strftime('%d/%m/%y')}")
 
             # --- Write back to Excel ---
             for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
