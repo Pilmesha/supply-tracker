@@ -72,8 +72,8 @@ def verify_zoho_signature(request, expected_module):
     if expected_module == "purchaseorders"
     else os.getenv("RECEIVE_WEBHOOK_SECRET")
     if expected_module == "purchasereceive"
-    else os.getenv("INVOICE_WEBHOOK_SECRET")
-    if expected_module == "invoice"
+    else os.getenv("BILL_WEBHOOK_SECRET")
+    if expected_module == "bill"
     else os.getenv("SHIPMENT_WEBHOOK_SECRET")
     
     ).encode("utf-8")
@@ -1018,11 +1018,216 @@ def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> No
                 file_stream.close()
             gc.collect()
 
-def handle_hach_invoice(so_numer: str, date: str)-> None:
-    print(f'handling hach with {so_numer}, dated {date}')
-def handle_non_hach_invoice(so_numer: str, date:str)-> None:
-    print(f'handling non-hach with {so_numer}, dated {date}')
+def handle_non_hach_bill(po_number: str, date: str)-> None:
+    with EXCEL_LOCK:
+        file_stream = None
+        wb = None
 
+        try:
+            po_str = str(po_number).strip()
+
+            # --- Step 1: Download Excel ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+            for attempt in range(6):
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    wb = load_workbook(file_stream)
+                    break
+                except Exception as e:
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ Download failed ({attempt+1}/6): {e}, retrying in {wait}s")
+                    time.sleep(wait)
+            else:
+                print("❌ Failed to download Excel")
+                return "Download failed", 500
+
+            # --- Step 2: Find sheet containing PO ---
+            target_sheet = None
+            target_df = None
+
+            for sheet_name in ("მიმდინარე ", "ჩამოსული"):
+                if sheet_name not in wb.sheetnames:
+                    continue
+
+                ws = wb[sheet_name]
+                df = pd.DataFrame(ws.values)
+                df.columns = df.iloc[0]
+                df = df[1:]
+
+                if "PO" not in df.columns:
+                    continue
+
+                df["PO"] = df["PO"].astype(str).str.strip()
+
+                if (df["PO"] == po_str).any():
+                    target_sheet = sheet_name
+                    target_df = df
+                    print(f"📄 Using sheet '{sheet_name}' for PO {po_str}")
+                    break
+
+            if target_sheet is None:
+                print(f"⚠️ PO {po_str} not found in any sheet")
+                return "PO not found", 200
+
+            ws = wb[target_sheet]
+
+            # --- Step 3: Validate column ---
+            deadline_col = "შეკვეთის ჩაბარების ვადა"
+            if deadline_col not in target_df.columns:
+                raise ValueError(f"Missing column '{deadline_col}' in '{target_sheet}'")
+
+            # --- Step 4: Compute date (date + 100 days, date only) ---
+            base_date = pd.to_datetime(date)
+            deadline_date = (base_date + pd.Timedelta(days=100)).normalize()
+
+            # --- Step 5: Fill only matching PO rows ---
+            po_mask = target_df["PO"] == po_str
+            target_df.loc[po_mask, deadline_col] = deadline_date
+
+            updated_rows = po_mask.sum()
+            print(f"✅ Filled '{deadline_col}' for {updated_rows} rows")
+
+            # --- Step 6: Write back to Excel ---
+            for col_idx, col_name in enumerate(target_df.columns, start=1):
+                ws.cell(row=1, column=col_idx).value = col_name
+
+            for row_idx, row in enumerate(target_df.values.tolist(), start=2):
+                for col_idx, value in enumerate(row, start=1):
+                    ws.cell(row=row_idx, column=col_idx).value = value
+
+            # --- Step 7: Save & upload ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+
+            for attempt in range(10):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                if resp.status_code in (423, 409):
+                    wait = min(30, 2 ** attempt)
+                    print(f"⚠️ File locked, retrying in {wait}s")
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                print("✅ Bill Excel update successful")
+                return "OK", 200
+
+            raise RuntimeError("Upload failed after retries")
+
+        except Exception as e:
+            print(f"❌ Fatal error in non-HACH bill handler: {e}")
+            return "Error", 500
+
+        finally:
+            if wb:
+                wb.close()
+            if file_stream:
+                file_stream.close()
+            gc.collect()
+
+def handle_hach_bill(po_number: str, date: str):
+    po_sheet = re.sub(r"\D", "", po_number).lstrip("00")
+    print(f"📄 HACH sheet name: {po_sheet}")
+
+    with EXCEL_LOCK:
+        wb = None
+        file_stream = None
+
+        try:
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+
+            resp = HTTP.get(url_download, headers=headers, timeout=60)
+            resp.raise_for_status()
+
+            file_stream = io.BytesIO(resp.content)
+            wb = load_workbook(file_stream)
+
+            if po_sheet not in wb.sheetnames:
+                raise ValueError(f"Sheet '{po_sheet}' not found in HACH file")
+
+            ws = wb[po_sheet]
+
+            # --- Get first table ---
+            if not ws.tables:
+                raise ValueError(f"No tables found in sheet '{po_sheet}'")
+
+            table = list(ws.tables.values())[0]
+            start_cell, end_cell = table.ref.split(":")
+            start_row = ws[start_cell].row
+            start_col = ws[start_cell].column
+            end_row = ws[end_cell].row
+            end_col = ws[end_cell].column
+
+            print(f"📊 Using table {table.name} ({table.ref})")
+
+            # --- Read table into pandas ---
+            data = [
+                list(r) for r in ws.iter_rows(
+                    min_row=start_row,
+                    max_row=end_row,
+                    min_col=start_col,
+                    max_col=end_col,
+                    values_only=True
+                )
+            ]
+
+            df = pd.DataFrame(data[1:], columns=data[0])
+
+            # --- Validate column ---
+            deadline_col = "მიწოდების ვადა"
+            if deadline_col not in df.columns:
+                raise ValueError(f"Missing column '{deadline_col}' in HACH table")
+
+            # --- Compute date: date + 100 days (date only) ---
+            base_date = pd.to_datetime(date)
+            deadline_date = (base_date + pd.Timedelta(days=100)).normalize()
+
+            # --- Fill column for all rows ---
+            df[deadline_col] = deadline_date.date()
+
+            print(f"✅ Filled '{deadline_col}' with {deadline_date.date()}")
+
+            # --- Write back to Excel ---
+            for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
+                for c_idx, value in enumerate(row, start=start_col):
+                    ws.cell(row=r_idx, column=c_idx).value = value
+
+            # --- Save & upload ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+
+            for attempt in range(8):
+                resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
+                if resp.status_code in (409, 423):
+                    time.sleep(min(30, 2 ** attempt))
+                    continue
+
+                resp.raise_for_status()
+                print("✅ HACH bill deadline updated successfully")
+                return "OK", 200
+
+            raise RuntimeError("Upload failed after retries")
+
+        except Exception as e:
+            print(f"❌ Fatal error in HACH bill handler: {e}")
+            return "Error", 500
+
+        finally:
+            if wb:
+                wb.close()
+            if file_stream:
+                file_stream.close()
+            gc.collect()
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
@@ -1107,29 +1312,21 @@ def delivered_webhook():
     except Exception as e:
         
         return f"Processing error: {e}", 500
-@app.route("/zoho/webhook/invoice", methods=["POST"])
-def invoice_webhook():
+@app.route("/zoho/webhook/bill", methods=["POST"])
+def bill_webhook():
     One_Drive_Auth()
 
-    if not verify_zoho_signature(request, "invoice"):
+    if not verify_zoho_signature(request, "bill"):
         print("❌ Signature verification failed")
         return "Invalid signature", 403
-
-    # --- Parse payload safely ---
-    payload = request.get_json(silent=True)
-    if payload is None:
-        payload = request.form.to_dict()
-
-    data = payload.get("data", payload)
-
-    print(f"📨 Invoice received | Customer: {data.get('customer')}")
-
+    payload = request.json or {}
+    data = payload.get("data", {})
     # --- Route by customer ---
     if data.get("customer") == "HACH":
         print("🏭 HACH vendor detected")
-        POOL.submit(handle_hach_invoice, data.get("sales_order_number"), data.get("date"))
+        POOL.submit(handle_hach_bill, data.get("po_number"), data.get("date"))
     else:
-        POOL.submit(handle_non_hach_invoice, data.get("sales_order_number"), data.get("date"))
+        POOL.submit(handle_non_hach_bill, data.get("po_number"), data.get("date"))
     return "OK", 200
 # -----------MAIL WEBHOOK -----------
 def safe_request(method, url, **kwargs):
