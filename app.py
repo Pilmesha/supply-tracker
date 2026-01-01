@@ -487,6 +487,36 @@ def graph_safe_request(method, url, headers, json=None, max_retries=5):
         last_resp.raise_for_status()
     else:
         raise RuntimeError("Graph request failed with no response returned.")
+def is_empty(val):
+    return val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == ""
+def extract_po_k_mapping(pdf_text: str) -> dict:
+    po_pattern = re.compile(r"PO-(\d+)")
+    k_pattern = re.compile(r"K\d+")
+
+    po_matches = list(po_pattern.finditer(pdf_text))
+    mapping = {}
+
+    for idx, po in enumerate(po_matches):
+        po_digits = str(int(po.group(1)))
+        block_start = po.end()
+
+        # block ends at next PO or end of document
+        block_end = (
+            po_matches[idx + 1].start()
+            if idx + 1 < len(po_matches)
+            else len(pdf_text)
+        )
+
+        po_block = pdf_text[block_start:block_end]
+
+        # Find FIRST K inside this PO block
+        k_match = k_pattern.search(po_block)
+        if k_match:
+            mapping[po_digits] = k_match.group(0).upper()
+        else:
+            print(f"⚠️ No K found inside PO-{po_digits} block")
+
+    return mapping
 # ----------- MAIN LOGIC -----------
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     df = df[df['Supplier Company'] != 'HACH']
@@ -1639,6 +1669,7 @@ def process_hach_message(mailbox, message_id, message_date):
             resp.raise_for_status()
             print(f"✅ HACH update successful ({updated} rows)")
             return
+
 def packing_list(mailbox, message_id, message_date):
     print(f"📦 Packing List processing | mailbox={mailbox}, message_id={message_id}")
 
@@ -1719,10 +1750,15 @@ def packing_list(mailbox, message_id, message_date):
             return
 
         print(f"📄 Found POs: {po_numbers}")
-        if multi_po:
-            po_text_map = split_pdf_by_po(pdf_text, po_numbers)
-        else:
-            po_text_map = {po_numbers[0]: pdf_text}
+        po_k_map = extract_po_k_mapping(pdf_text)
+
+        if not po_k_map:
+            print("❌ Could not map Packing Lists to POs")
+            return
+
+        print(f"🔗 PO → Packing List mapping: {po_k_map}")
+
+        po_text_map = split_pdf_by_po(pdf_text, list(po_k_map.keys()))
         print(po_text_map)
         # --- Step 5: Open Excel ONCE ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
@@ -1735,13 +1771,10 @@ def packing_list(mailbox, message_id, message_date):
         # --- Step 6: Process each PO ---
         for po_number_digits, po_text in po_text_map.items():
             print(f"➡️ Processing PO {po_number_digits}")
-            po_k_number = None
-            for k in k_numbers:
-                if k in po_text:
-                    po_k_number = k
-                    break
+            po_k_number = po_k_map.get(po_number_digits)
+
             if not po_k_number:
-                print(f"⚠️ No Packing List number found for PO {po_number_digits}, skipping")
+                print(f"⚠️ No Packing List mapped for PO {po_number_digits}")
                 continue
 
             print(f"🔗 PO {po_number_digits} → Packing List {po_k_number}")
@@ -1795,16 +1828,26 @@ def packing_list(mailbox, message_id, message_date):
                     code_quantity_map[code_str] = quantity
                 else:
                     code_quantity_map[code_str] = None
-
             updated = 0
+
             for idx, row in df.iterrows():
                 code = str(row["Code"]).strip()
-                if code in po_text:
+                if code not in po_text:
+                    continue
+
+                if is_empty(row.get("Packing List")):
                     df.at[idx, "Packing List"] = po_k_number
+
+                if is_empty(row.get("რა რიცხვში გამოგზავნეს Packing List-ი")):
                     df.at[idx, "რა რიცხვში გამოგზავნეს Packing List-ი"] = confirmation_date_str
+
+                if is_empty(row.get("ჩამოსვლის სავარაუდო თარიღი")):
                     df.at[idx, "ჩამოსვლის სავარაუდო თარიღი"] = arrival_date_str
-                    df.at[idx, "რამდენი გამოიგზავნა"] = code_quantity_map[code]
-                    updated += 1
+
+                if is_empty(row.get("რამდენი გამოიგზავნა")):
+                    df.at[idx, "რამდენი გამოიგზავნა"] = code_quantity_map.get(code)
+
+                updated += 1
 
             if updated == 0:
                 print(f"⚠️ No matching codes for PO {po_number_digits}")
@@ -1919,9 +1962,9 @@ def with_app_ctx_call(fn, *args, **kwargs):
     with app.app_context():
         return fn(*args, **kwargs)
 
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route("/zoho/webhook", methods=["GET", "POST"])
 def webhook():
-    # Validation: Graph sends GET with validationToken param
+    # --- Validation: Graph sends GET with validationToken param ---
     validation_token = request.args.get("validationToken")
     if validation_token:
         print(f"Validation request received: {validation_token}")
@@ -1929,62 +1972,119 @@ def webhook():
         resp.mimetype = "text/plain"
         return resp
 
-    if request.method == "POST":
-        try:
-            data = request.json or {}
-            notifications = data.get('value', [])
+    if request.method != "POST":
+        return jsonify({"status": "active"}), 200
 
-            # Patterns
-            po_pattern = re.compile(
-                r'(?i)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been (?:partially\s*)?received\b)'
+    try:
+        data = request.json or {}
+        notifications = data.get("value", [])
+
+        # --- Patterns ---
+        po_pattern = re.compile(
+            r'(?i)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been (?:partially\s*)?received\b)'
+        )
+        greenlight_pattern = re.compile(
+            r'^(Greenlight|Shipping) request.*?/K\d+', re.IGNORECASE
+        )
+
+        for notification in notifications:
+            resource = notification.get("resource", "")
+            message_url = f"{GRAPH_URL}/{resource}"
+
+            message_response = safe_request(
+                "get",
+                message_url,
+                headers=get_headers(),
+                timeout=20
             )
-            greenlight_pattern = re.compile(r'^(Greenlight|Shipping) request.*?/K\d+', re.IGNORECASE)
 
-            for notification in notifications:
-                resource = notification.get('resource', '')
-                message_url = f"{GRAPH_URL}/{resource}"
-                message_response = safe_request("get", message_url, headers=get_headers(), timeout=20)
+            if message_response.status_code != 200:
+                print(
+                    f"❌ Error fetching message: "
+                    f"{message_response.status_code} - {message_response.text}"
+                )
+                continue
 
-                if message_response.status_code != 200:
-                    print(f"Error fetching message: {message_response.status_code} - {message_response.text}")
-                    continue
+            message = message_response.json()
 
-                message = message_response.json()
-                subject = message.get('subject', '')
-                sender_email = message.get('from', {}).get('emailAddress', {}).get('address', '').lower()
-                message_id = message.get('id')
-                message_date = message.get('receivedDateTime')
+            # --- Message fields ---
+            subject = message.get("subject", "")
 
-                # parse mailbox robustly
-                path_parts = resource.split('/')
-                mailbox = "unknown"
-                try:
-                    if len(path_parts) >= 4 and path_parts[0].lower() in ("users", "me"):
-                        mailbox = path_parts[1]
-                except Exception:
-                    print(f"Warning: Unexpected resource format: {resource}")
+            sender_email = (
+                message.get("from", {})
+                .get("emailAddress", {})
+                .get("address", "")
+                .lower()
+            )
 
-            # --- Branch logic ---
+            to_emails = [
+                r.get("emailAddress", {}).get("address", "")
+                for r in message.get("toRecipients", [])
+            ]
+
+            cc_emails = [
+                r.get("emailAddress", {}).get("address", "")
+                for r in message.get("ccRecipients", [])
+            ]
+
+            message_id = message.get("id")
+            message_date = message.get("receivedDateTime")
+
+            # --- Parse mailbox from resource ---
+            mailbox = "unknown"
+            try:
+                path_parts = resource.split("/")
+                if len(path_parts) >= 2 and path_parts[0].lower() in ("users", "me"):
+                    mailbox = path_parts[1]
+            except Exception:
+                print(f"⚠️ Unexpected resource format: {resource}")
+
+            # --- Log message ---
+            print("📨 New message received")
+            print(f"   Subject: {subject}")
+            print(f"   From: {sender_email}")
+            print(f"   To: {', '.join(to_emails) if to_emails else '—'}")
+            if cc_emails:
+                print(f"   CC: {', '.join(cc_emails)}")
+            print("-" * 60)
+
+            # --- Branch logic (INSIDE LOOP) ---
             if po_pattern.search(subject):
                 if "@hach.com" in sender_email:
-                    print(f"✅ PO pattern from hach.com: scheduling process_hach_message")
-                    POOL.submit(process_hach_message, mailbox, message_id, message_date)
+                    print("✅ PO pattern from hach.com → process_hach_message")
+                    POOL.submit(
+                        process_hach_message,
+                        mailbox,
+                        message_id,
+                        message_date
+                    )
                 else:
-                    print(f"✅ PO pattern from other sender: scheduling process_message")
-                    POOL.submit(process_message, mailbox, message_id, message_date)
+                    print("✅ PO pattern from other sender → process_message")
+                    POOL.submit(
+                        process_message,
+                        mailbox,
+                        message_id,
+                        message_date
+                    )
 
             elif greenlight_pattern.search(subject):
-                print(f"✅ Greenlight request matched: scheduling packing_list")
-                POOL.submit(packing_list, mailbox, message_id, message_date)
+                print("✅ Greenlight request → packing_list")
+                POOL.submit(
+                    packing_list,
+                    mailbox,
+                    message_id,
+                    message_date
+                )
 
-            return jsonify({"status": "accepted"}), 202
+            else:
+                print("ℹ️ Message ignored (no matching pattern)")
 
-        except Exception as e:
-            print(f"❌ Error processing webhook: {e}")
-            return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "accepted"}), 202
 
-    else:
-        return jsonify({"status": "active"}), 200
+    except Exception as e:
+        print(f"❌ Error processing webhook: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 def _initialize_subscriptions_worker(flask_app):
     with flask_app.app_context():
