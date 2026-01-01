@@ -1193,13 +1193,14 @@ def handle_hach_bill(po_number: str, date: str):
                 raise ValueError(f"Missing column '{deadline_col}' in HACH table")
 
             # --- Compute date: date + 100 days (date only) ---
-            base_date = pd.to_datetime(date)
-            deadline_date = (base_date + pd.Timedelta(days=100)).normalize()
+            base_date = pd.to_datetime(date, dayfirst=True)
+            deadline_date = base_date + pd.Timedelta(days=100)
 
             # --- Fill column for all rows ---
-            df[deadline_col] = deadline_date.date()
+            df[deadline_col] = deadline_date.strftime("%d/%m/%y")
 
-            print(f"✅ Filled '{deadline_col}' with {deadline_date.date()}")
+            print(f"📅 Base date: {base_date.strftime('%d/%m/%Y')}")
+            print(f"📅 Deadline (+100 days): {deadline_date.strftime("%d/%m/%y")}")
 
             # --- Write back to Excel ---
             for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
