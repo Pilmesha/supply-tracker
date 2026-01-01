@@ -1081,8 +1081,15 @@ def handle_non_hach_bill(po_number: str, date: str)-> None:
                 raise ValueError(f"Missing column '{deadline_col}' in '{target_sheet}'")
 
             # --- Step 4: Compute date (date + 100 days, date only) ---
-            base_date = pd.to_datetime(date)
-            deadline_date = (base_date + pd.Timedelta(days=100)).normalize()
+            base_date = pd.to_datetime(date, dayfirst=True)
+            # Calculate 100 days from base date
+            deadline_date = base_date + pd.Timedelta(days=100)
+            
+            # Format as DD/MM/YY (date only)
+            deadline_str = deadline_date.strftime("%d/%m/%y")
+            
+            print(f"📅 Base date: {base_date.strftime('%d/%m/%Y')}")
+            print(f"📅 Deadline (+100 days): {deadline_str}")
 
             # --- Step 5: Fill only matching PO rows ---
             po_mask = target_df["PO"] == po_str
