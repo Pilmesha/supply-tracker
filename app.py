@@ -11,6 +11,8 @@ from pytz import timezone
 from pathlib import Path
 load_dotenv()
 
+#======CONGIF=====
+
 # single session (reuse connections)
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "supply-tracker/1.0", "Content-Type": "application/x-www-form-urlencoded"})
@@ -52,7 +54,9 @@ WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
 
 app = Flask(__name__)
-# ----------- AUTH -----------
+
+
+# ======= AUTH ===========
 def refresh_access_token()-> str:
     global ACCESS_TOKEN
     url = "https://accounts.zoho.com/oauth/v2/token"
@@ -115,7 +119,6 @@ def One_Drive_Auth() -> str:
     except Exception as e:
         print(f"Error getting access token: {e}")
         return None
-
 def get_headers():
     global ACCESS_TOKEN_DRIVE, ACCESS_TOKEN_EXPIRY
     if (ACCESS_TOKEN_DRIVE is None) or (ACCESS_TOKEN_EXPIRY <= datetime.utcnow()):
@@ -124,151 +127,8 @@ def get_headers():
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
         "Content-Type": "application/json"
     }
-# ----------- GET DF -----------
-def get_purchase_order_df(order_id: str) -> pd.DataFrame:
-    # Get purchase order
-    url = f"https://www.zohoapis.com/inventory/v1/purchaseorders/{order_id}"
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
-        "X-com-zoho-inventory-organizationid": ORG_ID
-    }
-    
-    response = HTTP.get(url, headers=headers)
-    response.raise_for_status()
-    po = response.json().get("purchaseorder", {})
-    
-    supplier = po.get("vendor_name")
-    po_number = po.get("purchaseorder_number")
-    date = po.get("date")
-    reference = po.get("reference_number", "")
-    
-    if reference:
-        reference = reference.strip("()").strip().rstrip(",")
-    
-    # Find SO numbers in reference (but proceed even if none found)
-    so_numbers = re.findall(r"(?i)SO-\d+", reference) if reference else []
-    so_info_by_sku = {}
-    so_country = ""
-    
-    print(f"\nDebug: Reference = '{reference}'")
-    print(f"Debug: Found SO numbers = {so_numbers}")
-    
-    # Get sales orders if found
-    if so_numbers:
-        for so_num in so_numbers:
-            so_num = so_num.upper()
-            print(f"\nDebug: Fetching SO {so_num}")
-            try:
-                # First get the sales order to get its ID
-                search_response = HTTP.get(
-                    "https://www.zohoapis.com/inventory/v1/salesorders",
-                    headers=headers,
-                    params={"salesorder_number": so_num}
-                )
-                search_data = search_response.json()
-                salesorders = search_data.get("salesorders", [])
-                print(f"Debug: Found {len(salesorders)} sales orders")
-                
-                for so in salesorders:
-                    if so.get("salesorder_number", "").upper() == so_num:
-                        print(f"Debug: Found exact match for {so_num}")
-                        salesorder_id = so.get("salesorder_id")
-                        
-                        # Now get the full sales order with line items
-                        so_detail_url = f"https://www.zohoapis.com/inventory/v1/salesorders/{salesorder_id}"
-                        so_response = HTTP.get(so_detail_url, headers=headers)
-                        so_response.raise_for_status()
-                        so_detail = so_response.json().get("salesorder", {})
-                        line_items = so_detail.get("line_items", [])
-                        
-                        print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
-                        
-                        # Process ALL line items - NO break here
-                        for item in line_items:
-                            sku = item.get("sku")
-                            item_name = item.get("name")
-                            print(f"Debug: SO Item - Name: {item_name}, SKU: {sku}")
-                            
-                            if sku:
-                                so_info_by_sku[sku] = {
-                                    "SO": so_num,
-                                    "SO_Customer": so_detail.get("customer_name"),
-                                    "SO_Date": so_detail.get("date"),
-                                    "SO_Status": so_detail.get("status"),
-                                    "SO_Item_Name": item_name,
-                                    "SO_Item_Quantity": item.get("quantity"),
-                                    "SO_Country": so_detail.get("country")
-                                }
-                        # Get SO country for export logic
-                        so_country = (
-                            so_detail.get("shipping_address", {}).get("country") or 
-                            so_detail.get("billing_address", {}).get("country") or 
-                            so_detail.get("country") or 
-                            ""
-                        )
-                        print(f"Debug: SO country detected = '{so_country}'")
-                        break  # Break only after processing this SO
-                        
-            except Exception as e:
-                print(f"Debug: Error fetching SO {so_num}: {e}")
-                continue
-    
-    # Debug: Print PO items
-    print(f"\nDebug: PO {po_number} has {len(po.get('line_items', []))} items")
-    for idx, item in enumerate(po.get("line_items", []), 1):
-        sku = item.get("sku")
-        matched = "Yes" if sku in so_info_by_sku else "No"
-        print(f"Debug: PO Item {idx} - Name: {item.get('name')}, SKU: {sku}, Matched: {matched}")
-    
-    # Create DataFrame - ALWAYS create for every PO
-    items = []
-    for item in po.get("line_items", []):
-        sku = item.get("sku")
-        so_data = so_info_by_sku.get(sku, {})
-        is_match = "Yes" if sku in so_info_by_sku else "No"
-        so_number = so_data.get("SO", "")
-        
-        # Export logic for HACH
-        export_value = ""
-        if supplier == "HACH":
-            country_lc = so_country.lower() if so_country else ""
-            if "azerbaijan" in country_lc or "armenia" in country_lc:
-                export_value = "კი"
-            else:
-                export_value = "არა"
-        
-        item_dict = {
-            "Supplier Company": supplier,
-            "PO": po_number,
-            "შეკვეთის გაკეთების თარიღი": date,
-            "Item": item.get("name"),
-            "Code": sku,
-            "Reference": reference,
-            "შეკვეთილი რაოდენობა": item.get("quantity"),
-            "Customer": so_data.get("SO_Customer") or next(
-                (f.get("value_formatted") for f in item.get("item_custom_fields", []) if f.get("label") == "Customer"),
-                ""
-            ),
-            "SO": so_number,
-            "SO_Customer": so_data.get("SO_Customer", ""),
-            "SO_Match": is_match,
-            "Export?": export_value
-        }
-        items.append(item_dict)
-    
-    df = pd.DataFrame(items)
-    
-    # Print summary
-    matches = df[df['SO_Match'] == 'Yes']
-    print(f"SOs in reference: {', '.join(so_numbers) if so_numbers else 'None'}")
-    print(f"Items matched: {len(matches)}/{len(df)}")
-    # Process HACH but still return DataFrame
-    if supplier == "HACH":
-        process_hach(df)
-    
-    # ALWAYS return the DataFrame
-    return df
-# ----------- HELPER FUNCS FOR EXCEL -----------
+
+# =========== HELPER FUNCS FOR EXCEL =============
 def get_used_range(sheet_name: str):
     """Get the used range of a worksheet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
@@ -517,7 +377,166 @@ def extract_po_k_mapping(pdf_text: str) -> dict:
             print(f"⚠️ No K found inside PO-{po_digits} block")
 
     return mapping
-# ----------- MAIN LOGIC -----------
+def get_sheet_values(sheet_name: str):
+    """Get actual usedRange values (including header row)."""
+    url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/"
+        f"{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange?$select=values"
+    )
+    
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    
+    resp = HTTP.get(url, headers=headers)
+    resp.raise_for_status()
+
+    result = resp.json()
+    return result.get("values", [])  # this is the list of rows
+
+# =========== MAIN LOGIC ==========
+def get_purchase_order_df(order_id: str) -> pd.DataFrame:
+    # Get purchase order
+    url = f"https://www.zohoapis.com/inventory/v1/purchaseorders/{order_id}"
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
+        "X-com-zoho-inventory-organizationid": ORG_ID
+    }
+    
+    response = HTTP.get(url, headers=headers)
+    response.raise_for_status()
+    po = response.json().get("purchaseorder", {})
+    
+    supplier = po.get("vendor_name")
+    po_number = po.get("purchaseorder_number")
+    date = po.get("date")
+    reference = po.get("reference_number", "")
+    
+    if reference:
+        reference = reference.strip("()").strip().rstrip(",")
+    
+    # Find SO numbers in reference (but proceed even if none found)
+    so_numbers = re.findall(r"(?i)SO-\d+", reference) if reference else []
+    so_info_by_sku = {}
+    so_country = ""
+    
+    print(f"\nDebug: Reference = '{reference}'")
+    print(f"Debug: Found SO numbers = {so_numbers}")
+    
+    # Get sales orders if found
+    if so_numbers:
+        for so_num in so_numbers:
+            so_num = so_num.upper()
+            print(f"\nDebug: Fetching SO {so_num}")
+            try:
+                # First get the sales order to get its ID
+                search_response = HTTP.get(
+                    "https://www.zohoapis.com/inventory/v1/salesorders",
+                    headers=headers,
+                    params={"salesorder_number": so_num}
+                )
+                search_data = search_response.json()
+                salesorders = search_data.get("salesorders", [])
+                print(f"Debug: Found {len(salesorders)} sales orders")
+                
+                for so in salesorders:
+                    if so.get("salesorder_number", "").upper() == so_num:
+                        print(f"Debug: Found exact match for {so_num}")
+                        salesorder_id = so.get("salesorder_id")
+                        
+                        # Now get the full sales order with line items
+                        so_detail_url = f"https://www.zohoapis.com/inventory/v1/salesorders/{salesorder_id}"
+                        so_response = HTTP.get(so_detail_url, headers=headers)
+                        so_response.raise_for_status()
+                        so_detail = so_response.json().get("salesorder", {})
+                        line_items = so_detail.get("line_items", [])
+                        
+                        print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
+                        
+                        # Process ALL line items - NO break here
+                        for item in line_items:
+                            sku = item.get("sku")
+                            item_name = item.get("name")
+                            print(f"Debug: SO Item - Name: {item_name}, SKU: {sku}")
+                            
+                            if sku:
+                                so_info_by_sku[sku] = {
+                                    "SO": so_num,
+                                    "SO_Customer": so_detail.get("customer_name"),
+                                    "SO_Date": so_detail.get("date"),
+                                    "SO_Status": so_detail.get("status"),
+                                    "SO_Item_Name": item_name,
+                                    "SO_Item_Quantity": item.get("quantity"),
+                                    "SO_Country": so_detail.get("country")
+                                }
+                        # Get SO country for export logic
+                        so_country = (
+                            so_detail.get("shipping_address", {}).get("country") or 
+                            so_detail.get("billing_address", {}).get("country") or 
+                            so_detail.get("country") or 
+                            ""
+                        )
+                        print(f"Debug: SO country detected = '{so_country}'")
+                        break  # Break only after processing this SO
+                        
+            except Exception as e:
+                print(f"Debug: Error fetching SO {so_num}: {e}")
+                continue
+    
+    # Debug: Print PO items
+    print(f"\nDebug: PO {po_number} has {len(po.get('line_items', []))} items")
+    for idx, item in enumerate(po.get("line_items", []), 1):
+        sku = item.get("sku")
+        matched = "Yes" if sku in so_info_by_sku else "No"
+        print(f"Debug: PO Item {idx} - Name: {item.get('name')}, SKU: {sku}, Matched: {matched}")
+    
+    # Create DataFrame - ALWAYS create for every PO
+    items = []
+    for item in po.get("line_items", []):
+        sku = item.get("sku")
+        so_data = so_info_by_sku.get(sku, {})
+        is_match = "Yes" if sku in so_info_by_sku else "No"
+        so_number = so_data.get("SO", "")
+        
+        # Export logic for HACH
+        export_value = ""
+        if supplier == "HACH":
+            country_lc = so_country.lower() if so_country else ""
+            if "azerbaijan" in country_lc or "armenia" in country_lc:
+                export_value = "კი"
+            else:
+                export_value = "არა"
+        
+        item_dict = {
+            "Supplier Company": supplier,
+            "PO": po_number,
+            "შეკვეთის გაკეთების თარიღი": date,
+            "Item": item.get("name"),
+            "Code": sku,
+            "Reference": reference,
+            "შეკვეთილი რაოდენობა": item.get("quantity"),
+            "Customer": so_data.get("SO_Customer") or next(
+                (f.get("value_formatted") for f in item.get("item_custom_fields", []) if f.get("label") == "Customer"),
+                ""
+            ),
+            "SO": so_number,
+            "SO_Customer": so_data.get("SO_Customer", ""),
+            "SO_Match": is_match,
+            "Export?": export_value
+        }
+        items.append(item_dict)
+    
+    df = pd.DataFrame(items)
+    
+    # Print summary
+    matches = df[df['SO_Match'] == 'Yes']
+    print(f"SOs in reference: {', '.join(so_numbers) if so_numbers else 'None'}")
+    print(f"Items matched: {len(matches)}/{len(df)}")
+    # Process HACH but still return DataFrame
+    if supplier == "HACH":
+        process_hach(df)
+    
+    # ALWAYS return the DataFrame
+    return df
+
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     df = df[df['Supplier Company'] != 'HACH']
     if df.empty:
@@ -624,20 +643,6 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     else:
         print("❌ Error response content (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
-def get_sheet_values(sheet_name: str):
-    """Get actual usedRange values (including header row)."""
-    url = (
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/"
-        f"{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange?$select=values"
-    )
-    
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    
-    resp = HTTP.get(url, headers=headers)
-    resp.raise_for_status()
-
-    result = resp.json()
-    return result.get("values", [])  # this is the list of rows
 
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
@@ -737,6 +742,7 @@ def process_hach(df: pd.DataFrame) -> None:
             import traceback
             traceback.print_exc()
             raise
+
 def process_shipment(order_number: str) -> None:
         try:
             # --- Load sheet values ---
@@ -1267,112 +1273,7 @@ def handle_hach_bill(po_number: str, date: str):
             if file_stream:
                 file_stream.close()
             gc.collect()
-@app.route("/")
-def index():
-    return "App is running. Scheduler is active."
 
-# ----------- PURCHASE ORDER WEBHOOK -----------
-@app.route("/zoho/webhook/purchase", methods=["POST"])
-def purchase_webhook():
-    try:
-        One_Drive_Auth()
-
-        if not verify_zoho_signature(request, "purchaseorders"):
-            return "Invalid signature", 403
-
-        order_id = request.json.get("data", {}).get("purchaseorders_id")
-        if not order_id:
-            return "Missing order ID", 400
-        try:
-            append_dataframe_to_table(get_purchase_order_df(order_id), "მიმდინარე ")
-            return "OK", 200
-        except Exception as e:
-            return f"Processing error: {e}", 500
-
-
-    except Exception as e:
-        print(f"❌ Webhook processing error: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"Processing error: {e}", 500
-@app.route("/zoho/webhook/receive", methods=["POST"])
-def receive_webhook():
-    try:
-        One_Drive_Auth()
-        if not verify_zoho_signature(request, "purchasereceive"):
-            print("❌ Signature verification failed")
-            return "Invalid signature", 403
-        payload = request.json or {}
-        data = payload.get("data", {})
-        receive_id = data.get("purchase_receive_id")
-        if not receive_id:
-            print("❌ purchase_receive_id missing from payload")
-            return "Missing purchase_receive_id", 400
-        url = f"https://www.zohoapis.com/inventory/v1/purchasereceives/{receive_id}"
-        headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
-        }
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-
-        receive = response.json().get("purchasereceive", {})
-        # --- Extract line items ---
-        items = receive.get("line_items", [])
-        if not items:
-            print("⚠️ No line items found")
-        vendor_name = receive.get("vendor_name").upper()
-        vendor_name = receive.get("vendor_name", "").upper()
-        if vendor_name == "HACH":
-            print("🏭 HACH vendor detected")
-            POOL.submit(update_hach_excel, receive.get("purchaseorder_number"), receive.get("date"),receive.get("line_items", []))
-        else:
-            POOL.submit(update_nonhach_excel, receive.get("purchaseorder_number"), receive.get("date"), receive.get("line_items", []))
-        return "OK", 200
-
-    except Exception as e:
-        print(f"❌ Webhook processing error: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"Processing error: {e}", 500
-# ----------- DELIVERED ORDER WEBHOOK -----------
-@app.route('/zoho/webhook/delivered', methods=['POST'])
-def delivered_webhook():
-    One_Drive_Auth()
-    if not verify_zoho_signature(request, "shipmentorders"):
-            return "Invalid signature", 403
-    order_num = request.json.get("data", {}).get("sales_order_number")
-
-    if not order_num:
-        return "Missing order ID", 400
-
-    try:
-        POOL.submit(process_shipment, order_num)
-        return "OK", 200
-    except Exception as e:
-        
-        return f"Processing error: {e}", 500
-@app.route("/zoho/webhook/bill", methods=["POST"])
-def bill_webhook():
-    One_Drive_Auth()
-
-    if not verify_zoho_signature(request, "bill"):
-        print("❌ Signature verification failed")
-        return "Invalid signature", 403
-    payload = request.json or {}
-    data = payload.get("data", {})
-    # --- Route by customer ---
-    if data.get("customer") == "HACH":
-        print("🏭 HACH vendor detected")
-        POOL.submit(handle_hach_bill, data.get("po_number"), data.get("date"))
-    else:
-        POOL.submit(handle_non_hach_bill, data.get("po_number"), data.get("date"))
-    return "OK", 200
-# -----------MAIL WEBHOOK -----------
-def safe_request(method, url, **kwargs):
-    """Wrapper to apply a default timeout and route through our retrying session."""
-    timeout = kwargs.pop("timeout", 30)
-    func = getattr(HTTP, method.lower())
-    return func(url, timeout=timeout, **kwargs)
 def process_message(mailbox, message_id, message_date):
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
@@ -1518,6 +1419,7 @@ def process_message(mailbox, message_id, message_date):
             del orders_df
             gc.collect()
             return
+
 def process_hach_message(mailbox, message_id, message_date):
     print(f"📦 HACH processing | mailbox={mailbox}, message_id={message_id}")
     if isinstance(message_date, str):
@@ -1880,6 +1782,112 @@ def packing_list(mailbox, message_id, message_date):
             resp.raise_for_status()
             print(f"🎉 Packing List updated successfully ({total_updated} rows)")
             return
+
+# ==========ENDPOINTS========
+@app.route("/")
+def index():
+    return "App is running. Scheduler is active."
+@app.route("/zoho/webhook/purchase", methods=["POST"])
+def purchase_webhook():
+    try:
+        One_Drive_Auth()
+
+        if not verify_zoho_signature(request, "purchaseorders"):
+            return "Invalid signature", 403
+
+        order_id = request.json.get("data", {}).get("purchaseorders_id")
+        if not order_id:
+            return "Missing order ID", 400
+        try:
+            append_dataframe_to_table(get_purchase_order_df(order_id), "მიმდინარე ")
+            return "OK", 200
+        except Exception as e:
+            return f"Processing error: {e}", 500
+
+
+    except Exception as e:
+        print(f"❌ Webhook processing error: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"Processing error: {e}", 500
+@app.route("/zoho/webhook/receive", methods=["POST"])
+def receive_webhook():
+    try:
+        One_Drive_Auth()
+        if not verify_zoho_signature(request, "purchasereceive"):
+            print("❌ Signature verification failed")
+            return "Invalid signature", 403
+        payload = request.json or {}
+        data = payload.get("data", {})
+        receive_id = data.get("purchase_receive_id")
+        if not receive_id:
+            print("❌ purchase_receive_id missing from payload")
+            return "Missing purchase_receive_id", 400
+        url = f"https://www.zohoapis.com/inventory/v1/purchasereceives/{receive_id}"
+        headers = {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+
+        receive = response.json().get("purchasereceive", {})
+        # --- Extract line items ---
+        items = receive.get("line_items", [])
+        if not items:
+            print("⚠️ No line items found")
+        vendor_name = receive.get("vendor_name").upper()
+        vendor_name = receive.get("vendor_name", "").upper()
+        if vendor_name == "HACH":
+            print("🏭 HACH vendor detected")
+            POOL.submit(update_hach_excel, receive.get("purchaseorder_number"), receive.get("date"),receive.get("line_items", []))
+        else:
+            POOL.submit(update_nonhach_excel, receive.get("purchaseorder_number"), receive.get("date"), receive.get("line_items", []))
+        return "OK", 200
+
+    except Exception as e:
+        print(f"❌ Webhook processing error: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"Processing error: {e}", 500
+@app.route('/zoho/webhook/delivered', methods=['POST'])
+def delivered_webhook():
+    One_Drive_Auth()
+    if not verify_zoho_signature(request, "shipmentorders"):
+            return "Invalid signature", 403
+    order_num = request.json.get("data", {}).get("sales_order_number")
+
+    if not order_num:
+        return "Missing order ID", 400
+
+    try:
+        POOL.submit(process_shipment, order_num)
+        return "OK", 200
+    except Exception as e:
+        
+        return f"Processing error: {e}", 500
+@app.route("/zoho/webhook/bill", methods=["POST"])
+def bill_webhook():
+    One_Drive_Auth()
+
+    if not verify_zoho_signature(request, "bill"):
+        print("❌ Signature verification failed")
+        return "Invalid signature", 403
+    payload = request.json or {}
+    data = payload.get("data", {})
+    # --- Route by customer ---
+    if data.get("customer") == "HACH":
+        print("🏭 HACH vendor detected")
+        POOL.submit(handle_hach_bill, data.get("po_number"), data.get("date"))
+    else:
+        POOL.submit(handle_non_hach_bill, data.get("po_number"), data.get("date"))
+    return "OK", 200
+
+# ===========MAIL PROCESSING============
+def safe_request(method, url, **kwargs):
+    """Wrapper to apply a default timeout and route through our retrying session."""
+    timeout = kwargs.pop("timeout", 30)
+    func = getattr(HTTP, method.lower())
+    return func(url, timeout=timeout, **kwargs)
 def clear_all_subscriptions():
     headers = get_headers()
     subs_url = f"{GRAPH_URL}/subscriptions"
@@ -1962,6 +1970,7 @@ def with_app_ctx_call(fn, *args, **kwargs):
     with app.app_context():
         return fn(*args, **kwargs)
 
+# ===========MAIL ENDPOINTS============
 @app.route("/zoho/webhook", methods=["GET", "POST"])
 def webhook():
     # --- Validation: Graph sends GET with validationToken param ---
@@ -2084,15 +2093,12 @@ def webhook():
     except Exception as e:
         print(f"❌ Error processing webhook: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
 def _initialize_subscriptions_worker(flask_app):
     with flask_app.app_context():
         try:
             initialize_subscriptions()
         except Exception as e:
             print(f"❌ initialize_subscriptions_worker exception: {e}")
-
 @app.route("/init", methods=["GET", "POST"])
 def init_subscriptions_endpoint():
     try:
@@ -2121,7 +2127,6 @@ def list_subscriptions():
             return jsonify({"status": "error", "message": resp.text}), 400
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
 @app.route("/cleanup", methods=["GET", "POST"])
 def cleanup_subscriptions():
     try:
@@ -2131,7 +2136,8 @@ def cleanup_subscriptions():
         return jsonify({"status": "success", "message": "Subscription cleanup scheduled"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-# ----------- HEALTH CHECK -----------
+
+# ========== HEALTH CHECK ===============
 @app.route("/health")
 def health():
     return {'health':'ok'}
