@@ -130,15 +130,12 @@ def get_headers():
 
 # =========== HELPER FUNCS FOR EXCEL =============
 def get_used_range(sheet_name: str):
-    """Get the used range of a worksheet"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     resp = HTTP.get(url, headers=headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
 def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retries=3):
-    """Return existing table on the specific sheet, or create a new one."""
-    
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
     # ✅ 1. Query ONLY tables from the specified sheet
@@ -177,16 +174,12 @@ def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retr
         f"{resp.status_code} {resp.text}"
     )
 def get_table_columns(table_name):
-    """Fetch column names of an existing Excel table"""
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
 def delete_table_rows(sheet_name: str, row_numbers: list[int]):
-    """
-    Delete worksheet rows using Graph API, works even for tables.
-    """
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
         "Content-Type": "application/json"
@@ -378,7 +371,6 @@ def extract_po_k_mapping(pdf_text: str) -> dict:
 
     return mapping
 def get_sheet_values(sheet_name: str):
-    """Get actual usedRange values (including header row)."""
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/"
         f"{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange?$select=values"
