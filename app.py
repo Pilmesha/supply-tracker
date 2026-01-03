@@ -1884,7 +1884,6 @@ def bill_webhook():
 
 # ===========MAIL PROCESSING============
 def safe_request(method, url, **kwargs):
-    """Wrapper to apply a default timeout and route through our retrying session."""
     timeout = kwargs.pop("timeout", 30)
     func = getattr(HTTP, method.lower())
     return func(url, timeout=timeout, **kwargs)
@@ -1906,10 +1905,6 @@ def clear_all_subscriptions():
         else:
             print(f"Deleted subscription {sub_id}")
 def create_subscription_for_user(mailbox):
-    """
-    Create a subscription. Do NOT block waiting for Graph validation; Graph will call your webhook GET with validationToken.
-    Keep the function thread-safe and idempotent-friendly.
-    """
     expiration_time = (datetime.utcnow() + timedelta(minutes=4230)).isoformat() + "Z"
     data = {
         "changeType": "created",
@@ -1941,9 +1936,6 @@ def create_subscription_for_user(mailbox):
         print(f"❌ Failed to create subscription for {mailbox}: {response.status_code} {response.text}")
         return None
 def initialize_subscriptions():
-    """
-    Must be called inside an application context if get_headers/One_Drive_Auth need it.
-    """
     print("[initialize_subscriptions] Setting up subscriptions...")
     clear_all_subscriptions()
     futures = []
@@ -1971,7 +1963,7 @@ def with_app_ctx_call(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 # ===========MAIL ENDPOINTS============
-@app.route("/zoho/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     # --- Validation: Graph sends GET with validationToken param ---
     validation_token = request.args.get("validationToken")
