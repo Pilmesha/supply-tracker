@@ -76,8 +76,8 @@ def verify_zoho_signature(request, expected_module):
     if expected_module == "purchaseorders"
     else os.getenv("RECEIVE_WEBHOOK_SECRET")
     if expected_module == "purchasereceive"
-    else os.getenv("BILL_WEBHOOK_SECRET")
-    if expected_module == "bill"
+    else os.getenv("INVOICE_WEBHOOK_SECRET")
+    if expected_module == "invoice"
     else os.getenv("SHIPMENT_WEBHOOK_SECRET")
     
     ).encode("utf-8")
@@ -1046,226 +1046,6 @@ def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> No
                 file_stream.close()
             gc.collect()
 
-def handle_non_hach_bill(po_number: str, date: str)-> None:
-    with EXCEL_LOCK:
-        file_stream = None
-        wb = None
-
-        try:
-            po_str = str(po_number).strip()
-
-            # --- Step 1: Download Excel ---
-            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-
-            for attempt in range(6):
-                try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
-                    resp.raise_for_status()
-                    file_stream = io.BytesIO(resp.content)
-                    wb = load_workbook(file_stream)
-                    break
-                except Exception as e:
-                    wait = min(5 * (attempt + 1), 30)
-                    print(f"⚠️ Download failed ({attempt+1}/6): {e}, retrying in {wait}s")
-                    time.sleep(wait)
-            else:
-                print("❌ Failed to download Excel")
-                return "Download failed", 500
-
-            # --- Step 2: Find sheet containing PO ---
-            target_sheet = None
-            target_df = None
-
-            for sheet_name in ("მიმდინარე ", "ჩამოსული"):
-                if sheet_name not in wb.sheetnames:
-                    continue
-
-                ws = wb[sheet_name]
-                df = pd.DataFrame(ws.values)
-                df.columns = df.iloc[0]
-                df = df[1:]
-
-                if "PO" not in df.columns:
-                    continue
-
-                df["PO"] = df["PO"].astype(str).str.strip()
-
-                if (df["PO"] == po_str).any():
-                    target_sheet = sheet_name
-                    target_df = df
-                    print(f"📄 Using sheet '{sheet_name}' for PO {po_str}")
-                    break
-
-            if target_sheet is None:
-                print(f"⚠️ PO {po_str} not found in any sheet")
-                return "PO not found", 200
-
-            ws = wb[target_sheet]
-
-            # --- Step 3: Validate column ---
-            deadline_col = "შეკვეთის ჩაბარების ვადა"
-            if deadline_col not in target_df.columns:
-                raise ValueError(f"Missing column '{deadline_col}' in '{target_sheet}'")
-
-            # --- Step 4: Compute date (date + 100 days, date only) ---
-            base_date = pd.to_datetime(date, dayfirst=True)
-            # Calculate 100 days from base date
-            deadline_date = base_date + pd.Timedelta(days=100)
-            
-            # Format as DD/MM/YY (date only)
-            deadline_str = deadline_date.strftime("%d/%m/%y")
-            
-            print(f"📅 Base date: {base_date.strftime('%d/%m/%Y')}")
-            print(f"📅 Deadline (+100 days): {deadline_str}")
-
-            # --- Step 5: Fill only matching PO rows ---
-            po_mask = target_df["PO"] == po_str
-            target_df.loc[po_mask, deadline_col] = deadline_date
-
-            updated_rows = po_mask.sum()
-            print(f"✅ Filled '{deadline_col}' for {updated_rows} rows")
-
-            # --- Step 6: Write back to Excel ---
-            for col_idx, col_name in enumerate(target_df.columns, start=1):
-                ws.cell(row=1, column=col_idx).value = col_name
-
-            for row_idx, row in enumerate(target_df.values.tolist(), start=2):
-                for col_idx, value in enumerate(row, start=1):
-                    ws.cell(row=row_idx, column=col_idx).value = value
-
-            # --- Step 7: Save & upload ---
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
-
-            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-
-            for attempt in range(10):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-                if resp.status_code in (423, 409):
-                    wait = min(30, 2 ** attempt)
-                    print(f"⚠️ File locked, retrying in {wait}s")
-                    time.sleep(wait)
-                    continue
-
-                resp.raise_for_status()
-                print("✅ Bill Excel update successful")
-                return "OK", 200
-
-            raise RuntimeError("Upload failed after retries")
-
-        except Exception as e:
-            print(f"❌ Fatal error in non-HACH bill handler: {e}")
-            return "Error", 500
-
-        finally:
-            if wb:
-                wb.close()
-            if file_stream:
-                file_stream.close()
-            gc.collect()
-
-def handle_hach_bill(po_number: str, date: str):
-    po_sheet = re.sub(r"\D", "", po_number).lstrip("00")
-    print(f"📄 HACH sheet name: {po_sheet}")
-
-    with EXCEL_LOCK:
-        wb = None
-        file_stream = None
-
-        try:
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
-
-            resp = HTTP.get(url_download, headers=headers, timeout=60)
-            resp.raise_for_status()
-
-            file_stream = io.BytesIO(resp.content)
-            wb = load_workbook(file_stream)
-
-            if po_sheet not in wb.sheetnames:
-                raise ValueError(f"Sheet '{po_sheet}' not found in HACH file")
-
-            ws = wb[po_sheet]
-
-            # --- Get first table ---
-            if not ws.tables:
-                raise ValueError(f"No tables found in sheet '{po_sheet}'")
-
-            table = list(ws.tables.values())[0]
-            start_cell, end_cell = table.ref.split(":")
-            start_row = ws[start_cell].row
-            start_col = ws[start_cell].column
-            end_row = ws[end_cell].row
-            end_col = ws[end_cell].column
-
-            print(f"📊 Using table {table.name} ({table.ref})")
-
-            # --- Read table into pandas ---
-            data = [
-                list(r) for r in ws.iter_rows(
-                    min_row=start_row,
-                    max_row=end_row,
-                    min_col=start_col,
-                    max_col=end_col,
-                    values_only=True
-                )
-            ]
-
-            df = pd.DataFrame(data[1:], columns=data[0])
-
-            # --- Validate column ---
-            deadline_col = "მიწოდების ვადა"
-            if deadline_col not in df.columns:
-                raise ValueError(f"Missing column '{deadline_col}' in HACH table")
-
-            # --- Compute date: date + 100 days (date only) ---
-            base_date = pd.to_datetime(date, dayfirst=True)
-            deadline_date = base_date + pd.Timedelta(days=100)
-
-            # --- Fill column for all rows ---
-            df[deadline_col] = deadline_date.strftime("%d/%m/%y")
-            deadline_str = deadline_date.strftime("%d/%m/%y")
-            print(f"📅 Base date: {base_date.strftime('%d/%m/%Y')}")
-            
-            print(f"📅 Deadline (+100 days): {deadline_str}")
-
-            # --- Write back to Excel ---
-            for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
-                for c_idx, value in enumerate(row, start=start_col):
-                    ws.cell(row=r_idx, column=c_idx).value = value
-
-            # --- Save & upload ---
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
-
-            upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
-
-            for attempt in range(8):
-                resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
-                if resp.status_code in (409, 423):
-                    time.sleep(min(30, 2 ** attempt))
-                    continue
-
-                resp.raise_for_status()
-                print("✅ HACH bill deadline updated successfully")
-                return "OK", 200
-
-            raise RuntimeError("Upload failed after retries")
-
-        except Exception as e:
-            print(f"❌ Fatal error in HACH bill handler: {e}")
-            return "Error", 500
-
-        finally:
-            if wb:
-                wb.close()
-            if file_stream:
-                file_stream.close()
-            gc.collect()
-
 def process_message(mailbox, message_id, message_date):
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
@@ -1775,6 +1555,233 @@ def packing_list(mailbox, message_id, message_date):
             print(f"🎉 Packing List updated successfully ({total_updated} rows)")
             return
 
+def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_start: str, delivery_end: str) -> None:
+    with EXCEL_LOCK:
+        file_stream = None
+        wb = None
+
+        try:
+            # --- Step 1: Download Excel ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+            for attempt in range(6):
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    wb = load_workbook(file_stream)
+                    break
+                except Exception as e:
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ Download failed ({attempt+1}/6): {e}, retrying in {wait}s")
+                    time.sleep(wait)
+            else:
+                print("❌ Failed to download Excel")
+                return
+
+            # --- Step 2: Locate target sheet ---
+            target_sheet = None
+            target_df = None
+
+            for sheet_name in ("მიმდინარე ", "ჩამოსული"):
+                if sheet_name not in wb.sheetnames:
+                    continue
+
+                ws = wb[sheet_name]
+                df = pd.DataFrame(ws.values)
+                df.columns = df.iloc[0]
+                df = df[1:]
+
+                if (df["SO"] == salesorder_number).any():
+                    target_sheet = sheet_name
+                    target_df = df.copy()
+                    print(f"📄 Using sheet '{sheet_name}'")
+                    break
+
+            if target_sheet is None:
+                print(f"⚠️ SO {salesorder_number} not found in any sheet")
+                return
+
+            ws = wb[target_sheet]
+
+            # --- Step 3: Validate columns ---
+            required_cols = {
+                "SO",
+                "Code",
+                "Supplier Company",
+                "შეკვეთის ჩაბარების ვადა"
+            }
+
+            if not required_cols.issubset(target_df.columns):
+                raise ValueError(f"Missing required columns in '{target_sheet}'")
+
+            # --- Step 4: Normalize ---
+            target_df["Code"] = target_df["Code"].astype(str).str.strip()
+            target_df["Supplier Company"] = target_df["Supplier Company"].astype(str)
+
+            # --- Step 5: Apply delivery dates (SO + SKU, NON-HACH only) ---
+            so_sku_mask = (
+                (target_df["SO"] == salesorder_number) &
+                (target_df["Code"].isin(skus))
+            )
+
+            if delivery_start == delivery_end:
+                target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = delivery_start
+            else:
+                target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = (
+                    f"{delivery_start} – {delivery_end}"
+                )
+
+            # --- Step 6: Write back to Excel ---
+            for col_idx, col_name in enumerate(target_df.columns, start=1):
+                ws.cell(row=1, column=col_idx).value = col_name
+
+            for row_idx, row in enumerate(target_df.itertuples(index=False), start=2):
+                for col_idx, value in enumerate(row, start=1):
+                    ws.cell(row=row_idx, column=col_idx).value = value
+
+            # --- Step 7: Save & upload ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+
+            for attempt in range(10):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                if resp.status_code in (423, 409):
+                    wait = min(30, 2 ** attempt)
+                    print(f"⚠️ File locked, retrying in {wait}s")
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                print("✅ Excel upload successful")
+                return
+
+            raise RuntimeError("Upload failed after retries")
+
+        except Exception as e:
+            print(f"❌ Fatal error: {e}")
+
+        finally:
+            if wb:
+                wb.close()
+            if file_stream:
+                file_stream.close()
+            gc.collect()
+
+def delivery_date_hach(salesorder_number: str, skus: list[str], delivery_start: str, delivery_end: str) -> None:
+    with EXCEL_LOCK:
+        file_stream = None
+        wb = None
+
+        try:
+            # --- Step 1: Download HACH Excel ---
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+            headers = {
+                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"
+            }
+
+            for attempt in range(6):
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    wb = load_workbook(file_stream)
+                    break
+                except Exception as e:
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ HACH Excel download failed ({attempt+1}/6): {e}, retrying in {wait}s")
+                    time.sleep(wait)
+            else:
+                print("❌ Failed to download HACH Excel")
+                return
+
+            # --- Step 2: Find matching sheet by scanning for SO ---
+            target_ws = None
+
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+
+                # Scan first 20 rows only (SO is always at the top)
+                for row in ws.iter_rows(min_row=1, max_row=20):
+                    for idx, cell in enumerate(row):
+                        if str(cell.value).strip().upper() == "SO":
+                            # Check cell to the right
+                            if idx + 1 < len(row):
+                                right_cell = row[idx + 1]
+                                if str(right_cell.value).strip() == salesorder_number:
+                                    target_ws = ws
+                                    print(f"📄 HACH sheet matched: '{sheet_name}'")
+                                    break
+                    if target_ws:
+                        break
+                if target_ws:
+                    break
+
+            if not target_ws:
+                print(f"⚠️ SO {salesorder_number} not found in any HACH sheet")
+                return
+
+            # --- Step 3: Locate 'მიწოდების ვადა' column ---
+            header_row = None
+            delivery_col_idx = None
+
+            for row in target_ws.iter_rows(min_row=1, max_row=10):
+                for idx, cell in enumerate(row):
+                    if str(cell.value).strip() == "მიწოდების ვადა":
+                        header_row = cell.row
+                        delivery_col_idx = idx + 1
+                        break
+                if delivery_col_idx:
+                    break
+
+            if not delivery_col_idx:
+                raise ValueError("❌ Column 'მიწოდების ვადა' not found in HACH sheet")
+
+            # --- Step 4: Write delivery date ---
+            # Convention: write value directly under header
+            ## To be continued
+            target_ws.cell(row=header_row + 1, column=delivery_col_idx).value = f"{delivery_start} – {delivery_end}"
+            # if delivery_start == delivery_end:
+            #     target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = delivery_start
+            # else:
+            #     target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = (
+            #         f"{delivery_start} – {delivery_end}"
+            #     )
+
+            # --- Step 5: Save & upload ---
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+
+            for attempt in range(10):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                if resp.status_code in (423, 409):
+                    wait = min(30, 2 ** attempt)
+                    print(f"⚠️ HACH file locked, retrying in {wait}s")
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                print("✅ HACH Excel updated successfully")
+                return
+
+            raise RuntimeError("❌ HACH Excel upload failed after retries")
+
+        except Exception as e:
+            print(f"❌ Fatal error in delivery_date_hach: {e}")
+
+        finally:
+            if wb:
+                wb.close()
+            if file_stream:
+                file_stream.close()
+            gc.collect()
 # ==========ENDPOINTS========
 @app.route("/")
 def index():
@@ -1857,22 +1864,128 @@ def delivered_webhook():
     except Exception as e:
         
         return f"Processing error: {e}", 500
-@app.route("/zoho/webhook/bill", methods=["POST"])
-def bill_webhook():
+@app.route("/zoho/webhook/invoice", methods=["POST"])
+def invoice_webhook():
     One_Drive_Auth()
 
-    if not verify_zoho_signature(request, "bill"):
+    if not verify_zoho_signature(request, "invoice"):
         print("❌ Signature verification failed")
         return "Invalid signature", 403
-    payload = request.json or {}
+
+    payload = request.get_json(force=True)
     data = payload.get("data", {})
-    # --- Route by customer ---
-    if data.get("customer") == "HACH":
-        print("🏭 HACH vendor detected")
-        POOL.submit(handle_hach_bill, data.get("po_number"), data.get("date"))
-    else:
-        POOL.submit(handle_non_hach_bill, data.get("po_number"), data.get("date"))
-    return "OK", 200
+    so_number = data.get("so_number")
+
+    if not so_number:
+        return jsonify({"error": "Missing sales order number"}), 400
+
+    base_datetime = datetime.now()
+
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
+        "X-com-zoho-inventory-organizationid": ORG_ID
+    }
+
+    # 1️⃣ Find Sales Order ID
+    search_resp = HTTP.get(
+        "https://www.zohoapis.com/inventory/v1/salesorders",
+        headers=headers,
+        params={"salesorder_number": so_number}
+    )
+    search_resp.raise_for_status()
+
+    salesorders = search_resp.json().get("salesorders", [])
+    so_id = next(
+        (so["salesorder_id"] for so in salesorders
+         if so.get("salesorder_number") == so_number),
+        None
+    )
+
+    if not so_id:
+        return jsonify({"error": f"Sales Order {so_number} not found"}), 404
+
+    # 2️⃣ Fetch full Sales Order
+    so_resp = HTTP.get(
+        f"https://www.zohoapis.com/inventory/v1/salesorders/{so_id}",
+        headers=headers
+    )
+    so_resp.raise_for_status()
+    so_detail = so_resp.json().get("salesorder", {})
+
+    # 3️⃣ Read delivery lead time CF
+    delivery_cf = (
+        so_detail
+        .get("custom_field_hash", {})
+        .get("cf_delivery_after_payment", "")
+    )
+
+    if not delivery_cf:
+        return jsonify({
+            "ok": True,
+            "message": "No delivery lead time defined"
+        }), 200
+
+    # 4️⃣ Parse weeks (single or range)
+    match = re.search(r"(\d+)(?:\s*-\s*(\d+))?\s*weeks?", delivery_cf.lower())
+    if not match:
+        return jsonify({
+            "ok": True,
+            "message": "Delivery lead time format not recognized"
+        }), 200
+
+    start_w = int(match.group(1))
+    end_w = int(match.group(2)) if match.group(2) else start_w
+
+    start_date = base_datetime + timedelta(weeks=start_w)
+    end_date = base_datetime + timedelta(weeks=end_w)
+
+    start_str = start_date.strftime("%d/%m/%y")
+    end_str = end_date.strftime("%d/%m/%y")
+
+    # 5️⃣ Split items by HACH / NON-HACH (ITEM LEVEL)
+    non_hach_skus = []
+    hach_skus = []
+    has_hach_items = False
+
+    for item in so_detail.get("line_items", []):
+        sku = item.get("sku")
+        created_by_email = (item.get("created_by_email") or "").lower()
+
+        if not sku:
+            continue
+
+        if "hach" in created_by_email:
+            has_hach_items = True
+            hach_skus.append(sku.upper())
+        else:
+            non_hach_skus.append(sku.upper())
+
+    # 6️⃣ Update NON-HACH (SO + SKU)
+    if non_hach_skus:
+        delivery_date_nonhach(
+            salesorder_number=so_number,
+            skus=non_hach_skus,
+            delivery_start=start_str,
+            delivery_end=end_str
+        )
+
+    # 7️⃣ Update HACH (sheet discovery by SO inside sheet)
+    if hach_skus:
+        delivery_date_hach(
+            salesorder_number=so_number,
+            skus=hach_skus,
+            delivery_start=start_str,
+            delivery_end=end_str
+        )
+
+    return jsonify({
+        "ok": True,
+        "salesorder": so_number,
+        "delivery_start": start_str,
+        "delivery_end": end_str,
+        "non_hach_skus": non_hach_skus,
+        "hach_present": has_hach_items
+    }), 200
 
 # ===========MAIL PROCESSING============
 def safe_request(method, url, **kwargs):
