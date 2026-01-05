@@ -9,6 +9,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pytz import timezone
 from pathlib import Path
+from collections import defaultdict
 load_dotenv()
 
 #======CONGIF=====
@@ -628,9 +629,62 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
     payload = {"values": rows}
-    resp = HTTP.post(url, headers=headers, json=payload)
     if resp.status_code in [200, 201]:
         print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
+
+        # --- Define base colors for suppliers ---
+        SUPPLIER_BASE_COLORS = {
+            "KROHNE": 
+                (91, 155, 213),
+            "Carl Roth": (112, 173, 71),
+            "Pentair": (255, 192, 0),
+            "In-Situ": (237, 125, 49),
+            "VWR" : (),
+        }
+
+        def shade_color(rgb, factor):
+            """Lighten/darken RGB color by factor"""
+            return tuple(max(0, min(255, int(c * factor))) for c in rgb)
+
+        # Track SO index per supplier
+        supplier_so_index = defaultdict(dict)
+        supplier_so_counter = defaultdict(int)
+
+        # Generate row colors
+        row_colors = []
+        for idx, row in out_df.iterrows():
+            supplier = row.get("Supplier Company", "")
+            so = row.get("SO Number", str(idx))  # fallback to row idx if no SO
+
+            base_color = SUPPLIER_BASE_COLORS.get(supplier, (220, 220, 220))
+
+            if so not in supplier_so_index[supplier]:
+                supplier_so_counter[supplier] += 1
+                supplier_so_index[supplier][so] = supplier_so_counter[supplier]
+
+            shade_idx = supplier_so_index[supplier][so]
+            factor = 1 + (shade_idx - 1) * 0.06  # 6% per SO difference
+            shaded = shade_color(base_color, factor)
+            row_colors.append(shaded)
+
+        # --- Apply colors via Graph API ---
+        start_row = get_table_row_count(table_name) - len(rows) + 1
+        end_row = start_row + len(rows) - 1
+        last_col_letter = "X"  # adjust to your last table column
+
+        for i, (r, g, b) in enumerate(row_colors):
+            row_idx = start_row + i
+            range_addr = f"A{row_idx}:{last_col_letter}{row_idx}"
+            format_url = (
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
+                f"/items/{FILE_ID}/workbook/worksheets/{sheet_name}"
+                f"/range(address='{range_addr}')/format/fill"
+            )
+            HTTP.patch(format_url, headers=headers, json={"color": f"#{r:02X}{g:02X}{b:02X}"})
+
+    else:
+        print("❌ Error response content (truncated):", resp.text[:500])
+        raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
         return resp.json()
     else:
         print("❌ Error response content (truncated):", resp.text[:500])
