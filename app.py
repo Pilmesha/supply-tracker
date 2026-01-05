@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify, make_response
 import pandas as pd
 from dotenv import load_dotenv
 from openpyxl import load_workbook
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -626,78 +626,77 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     # --------------------------------------------------
     rows = out_df.fillna("").astype(str).values.tolist()
 
+    tbl_range_url = (
+    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
+    f"/items/{FILE_ID}/workbook/tables/{table_name}/range"
+    )
+    hdrs = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    tbl_range = HTTP.get(tbl_range_url, headers=hdrs, timeout=30).json()["address"]
+
+    tbl_range = tbl_range.split("!")[-1]  # A1:X57
+    (start, end) = tbl_range.split(":")
+    first_col, first_row = re.match(r"([A-Z]+)(\d+)", start).groups()
+    last_col, last_row = re.match(r"([A-Z]+)(\d+)", end).groups()
+    first_row, last_row = int(first_row), int(last_row)
+
+    # ------------------ append rows ------------------
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
     payload = {"values": rows}
-    if resp.status_code in [200, 201]:
-        print(f"✅ Successfully appended {len(rows)} rows to table '{table_name}'")
+    resp = HTTP.post(url, headers=headers, json=payload)
 
-        # --- Define base colors for suppliers ---
-        SUPPLIER_BASE_COLORS = {
-            "KROHNE": (68, 114, 196),
-            "Carl Roth": (255, 0, 0),
-            "Pentair": (112, 173, 71),
-            "In-Situ": (255, 192, 0),
-            "VWR" : (244,176,132),
-            "Veolia Turkey" : (192,0,0),
-            "SAMSON": (172,185,202),
-            "HYDROO": (255,192,0),
-            "OTT HydroMet": (255,230,153),
-            "Akkim": (155,194,230),
-            "ATB WATER": (165,165,165),
-            "ITM": (198,89,17),
-            "AMAZON": (255,255,0),
-            "STAR VALVE": (217,225,242),
-            "VORTEX Water Engineering": (0,176,240),
-            "KORHUS FILTER SYSTEMS": (172,185,202),
-            "ToxSoft": (214,220,228),
-            "NERO": (255,230,153),
-            "AO Smith": (198,224,180)
-        }
+    if resp.status_code not in (200, 201):
+        raise Exception(f"❌ Append failed: {resp.status_code} {resp.text[:200]}")
 
-        def shade_color(rgb, factor):
-            """Lighten/darken RGB color by factor"""
-            return tuple(max(0, min(255, int(c * factor))) for c in rgb)
+    print(f"✅ Appended {len(rows)} rows")
 
-        # Track SO index per supplier
-        supplier_so_index = defaultdict(dict)
-        supplier_so_counter = defaultdict(int)
+    # ------------------ color logic ------------------
 
-        # Generate row colors
-        row_colors = []
-        for idx, row in out_df.iterrows():
-            supplier = row.get("Supplier Company", "")
-            so = row.get("SO", str(idx))  # fallback to row idx if no SO
+    SUPPLIER_BASE_COLORS = {
+        "KROHNE": (68,114,196), "Carl Roth": (255,0,0), "PENTAIR": (112,173,71),
+        "In-Situ": (255,192,0), "VWR": (244,176,132), "Veolia Turkey": (192,0,0),
+        "SAMSON": (172,185,202), "HYDROO": (255,192,0), "OTT HydroMet": (255,230,153),
+        "Akkim": (155,194,230), "ATB WATER": (165,165,165), "ITM": (198,89,17),
+        "AMAZON": (255,255,0), "STAR VALVE": (217,225,242),
+        "VORTEX Water Engineering": (0,176,240), "KORHUS FILTER SYSTEMS": (172,185,202),
+        "ToxSoft": (214,220,228), "NERO": (255,230,153), "AO Smith": (198,224,180)
+    }
 
-            base_color = SUPPLIER_BASE_COLORS.get(supplier, (220, 220, 220))
+    supplier_so_map = defaultdict(dict)
+    supplier_so_counter = defaultdict(int)
 
-            if so not in supplier_so_index[supplier]:
-                supplier_so_counter[supplier] += 1
-                supplier_so_index[supplier][so] = supplier_so_counter[supplier]
+    row_colors = []
 
-            shade_idx = supplier_so_index[supplier][so]
-            factor = 1 + (shade_idx - 1) * 0.06  # 6% per SO difference
-            shaded = shade_color(base_color, factor)
-            row_colors.append(shaded)
+    for _, r in out_df.iterrows():
+        supplier = r.get("Supplier Company", "")
+        so = r.get("SO", "")
+        
+        base = SUPPLIER_BASE_COLORS.get(supplier, (220,220,220))
+        
+        if so not in supplier_so_map[supplier]:
+            supplier_so_counter[supplier] += 1
+            supplier_so_map[supplier][so] = supplier_so_counter[supplier]
+        
+        so_index = supplier_so_map[supplier][so]
+        adjustment = (so_index - 1) * 35
+        
+        # Make each SO darker than the previous
+        row_colors.append(
+            tuple(max(0, min(255, int(c - adjustment))) for c in base)
+        )
 
-        # --- Apply colors via Graph API ---
-        start_row = get_table_row_count(table_name) - len(rows) + 1
-        end_row = start_row + len(rows) - 1
-        last_col_letter = "X"  # adjust to your last table column
+    # ------------------ apply colors ------------------
+    start_row = last_row + 1
 
-        for i, (r, g, b) in enumerate(row_colors):
-            row_idx = start_row + i
-            range_addr = f"A{row_idx}:{last_col_letter}{row_idx}"
-            format_url = (
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
-                f"/items/{FILE_ID}/workbook/worksheets/{sheet_name}"
-                f"/range(address='{range_addr}')/format/fill"
-            )
-            HTTP.patch(format_url, headers=headers, json={"color": f"#{r:02X}{g:02X}{b:02X}"})
-    else:
-        print("❌ Error response content (truncated):", resp.text[:500])
-        raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
-        return resp.json()
+    for i, (r,g,b) in enumerate(row_colors):
+        row_idx = start_row + i
+        rng = f"{first_col}{row_idx}:{last_col}{row_idx}"
+        fill_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
+            f"/items/{FILE_ID}/workbook/worksheets/{sheet_name}"
+            f"/range(address='{rng}')/format/fill"
+        )
+        HTTP.patch(fill_url, headers=hdrs, json={"color": f"#{r:02X}{g:02X}{b:02X}"})
 
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
@@ -1917,9 +1916,55 @@ def delivered_webhook():
     if not verify_zoho_signature(request, "shipmentorders"):
             return "Invalid signature", 403
     order_num = request.json.get("data", {}).get("sales_order_number")
+    customer_name = request.json.get("data", {}).get("customer_name")
+    customer_mail = request.json.get("data", {}).get("customer_mail")
+    print(order_num)
+    print(customer_name)
+    print(customer_mail)
+    # Customers who receive SPECIAL text
+    specials = {
+        "NEA","UWSCG", "Gardabani TPP", "Gardabani TPP 1"
+        "Gardabani TPP2","Georgian Technical University (GTU)","Batumi Water"
+    }
 
-    if not order_num:
-        return "Missing order ID", 400
+    is_special = customer_name in specials
+    today_str = date.today().strftime("%d-%m-%Y") 
+    # ===== EMAIL CONTENT =====
+    if is_special:
+        print("SLAAYYY this is special")
+        subject = f"შეკვეთა დასრულებულია"
+        body = f"""
+        <p>მოგესალმებით,</p>
+        <p>გატყობინებთ, შპს „საქართველოს წყლის სისტემების“ მიერ ({today_str}) მოწოდებულ იქნა შეკვეთა.</p>
+        <p>გთხოვთ, გამოგზავნოთ მიღება-ჩაბარების აქტი ხელმოსაწერად.</p>
+        <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“</p>
+        """
+    else:
+        print("NOT slay, not special")
+        subject = f"შეკვეთა დასრულებულია - შეკვეთა {order_num}"
+        body = f"""
+        <p>მოგესალმებით,</p>
+        <p>გატყობინებთ, შპს „საქართველოს წყლის სისტემების“ მიერ ({today_str}) მოწოდებულია შეკვეთა, (შეკვეთის ნომერი: {order_num})</p>
+        <p>გთხოვთ, უზრუნველყოთ ანგარიშსწორება შეთანხმების მიხედვით.</p>
+        <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“</p>
+        """
+    # for from_email in MAILBOXES:
+    #     r = requests.post(
+    #         f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail",
+    #         headers={
+    #             "Authorization": f"Bearer {ACCESS_TOKEN or refresh_access_token()}",
+    #             "Content-Type": "application/json"
+    #         },
+    #         json={
+    #             "message": {
+    #                 "subject": subject,
+    #                 "body": {"contentType": "HTML", "content": body},
+    #                 "toRecipients": [{"emailAddress": {"address": customer_mail}}]
+    #             },
+    #             "saveToSentItems": True
+    #         }
+    #     )
+    #     r.raise_for_status()  # will raise if sending fails
 
     try:
         POOL.submit(process_shipment, order_num)
