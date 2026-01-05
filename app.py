@@ -634,12 +634,25 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
         # --- Define base colors for suppliers ---
         SUPPLIER_BASE_COLORS = {
-            "KROHNE": 
-                (91, 155, 213),
+            "KROHNE": (91, 155, 213),
             "Carl Roth": (112, 173, 71),
             "Pentair": (255, 192, 0),
             "In-Situ": (237, 125, 49),
             "VWR" : (),
+            "Veolia Turkey" : (),
+            "SAMSON": (),
+            "HYDROO": (),
+            "OTT HydroMet": (),
+            "Akkim": (),
+            "ATB WATER": (),
+            "ITM": (),
+            "AMAZON": (),
+            "STAR VALVE": (),
+            "VORTEX Water Engineering": (),
+            "KORHUS FILTER SYSTEMS": (),
+            "ToxSoft": (),
+            "NERO": (),
+            "AO Smith": ()
         }
 
         def shade_color(rgb, factor):
