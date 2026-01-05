@@ -634,25 +634,25 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
         # --- Define base colors for suppliers ---
         SUPPLIER_BASE_COLORS = {
-            "KROHNE": (91, 155, 213),
-            "Carl Roth": (112, 173, 71),
-            "Pentair": (255, 192, 0),
-            "In-Situ": (237, 125, 49),
-            "VWR" : (),
-            "Veolia Turkey" : (),
-            "SAMSON": (),
-            "HYDROO": (),
-            "OTT HydroMet": (),
-            "Akkim": (),
-            "ATB WATER": (),
-            "ITM": (),
-            "AMAZON": (),
-            "STAR VALVE": (),
-            "VORTEX Water Engineering": (),
-            "KORHUS FILTER SYSTEMS": (),
-            "ToxSoft": (),
-            "NERO": (),
-            "AO Smith": ()
+            "KROHNE": (68, 114, 196),
+            "Carl Roth": (255, 0, 0),
+            "Pentair": (112, 173, 71),
+            "In-Situ": (255, 192, 0),
+            "VWR" : (244,176,132),
+            "Veolia Turkey" : (192,0,0),
+            "SAMSON": (172,185,202),
+            "HYDROO": (255,192,0),
+            "OTT HydroMet": (255,230,153),
+            "Akkim": (155,194,230),
+            "ATB WATER": (165,165,165),
+            "ITM": (198,89,17),
+            "AMAZON": (255,255,0),
+            "STAR VALVE": (217,225,242),
+            "VORTEX Water Engineering": (0,176,240),
+            "KORHUS FILTER SYSTEMS": (172,185,202),
+            "ToxSoft": (214,220,228),
+            "NERO": (255,230,153),
+            "AO Smith": (198,224,180)
         }
 
         def shade_color(rgb, factor):
@@ -667,7 +667,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         row_colors = []
         for idx, row in out_df.iterrows():
             supplier = row.get("Supplier Company", "")
-            so = row.get("SO Number", str(idx))  # fallback to row idx if no SO
+            so = row.get("SO", str(idx))  # fallback to row idx if no SO
 
             base_color = SUPPLIER_BASE_COLORS.get(supplier, (220, 220, 220))
 
@@ -694,14 +694,10 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
                 f"/range(address='{range_addr}')/format/fill"
             )
             HTTP.patch(format_url, headers=headers, json={"color": f"#{r:02X}{g:02X}{b:02X}"})
-
     else:
         print("❌ Error response content (truncated):", resp.text[:500])
         raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
         return resp.json()
-    else:
-        print("❌ Error response content (truncated):", resp.text[:500])
-        raise Exception(f"❌ Failed to append rows: {resp.status_code} {resp.text[:200]}")
 
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
