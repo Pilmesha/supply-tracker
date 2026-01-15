@@ -1921,6 +1921,45 @@ def delivered_webhook():
     print(order_num)
     print(customer_name)
     print(customer_mail)
+    url = "https://www.zohoapis.com/inventory/v1/invoices"
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
+    }
+    params = {
+        "organization_id": ORG_ID,
+        "salesorder_number": order_num
+    }
+
+    r = requests.get(url, headers=headers, params=params)
+    r.raise_for_status()
+
+    invoices = r.json().get("invoices", [])
+    if not invoices:
+        return None
+
+    invoice_id = invoices[0]["invoice_id"]
+    url = f"https://www.zohoapis.com/inventory/v1/invoices/{invoice_id}"
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
+    }
+    params = {
+        "organization_id": ORG_ID,
+        "accept": "pdf"
+    }
+
+    r = requests.get(url, headers=headers, params=params)
+    r.raise_for_status()
+
+    attachments = []
+    if invoice_id:
+        pdf_bytes = r.content
+        pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        attachments.append({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": f"Invoice_{order_num}.pdf",
+            "contentType": "application/pdf",
+            "contentBytes": pdf_base64
+        })
     # Customers who receive SPECIAL text
     specials = {
         "NEA","UWSCG", "Gardabani TPP", "Gardabani TPP 1"
@@ -1956,13 +1995,14 @@ def delivered_webhook():
     #             "Content-Type": "application/json"
     #         },
     #         json={
-    #             "message": {
-    #                 "subject": subject,
-    #                 "body": {"contentType": "HTML", "content": body},
-    #                 "toRecipients": [{"emailAddress": {"address": customer_mail}}]
-    #             },
-    #             "saveToSentItems": True
-    #         }
+    #         "message": {
+    #             "subject": subject,
+    #             "body": {"contentType": "HTML", "content": body},
+    #             "toRecipients": [{"emailAddress": {"address": customer_mail}}],
+    #             "attachments": attachments
+    #         },
+    #         "saveToSentItems": True
+    #     }
     #     )
     #     r.raise_for_status()  # will raise if sending fails
 
@@ -1970,7 +2010,6 @@ def delivered_webhook():
         POOL.submit(process_shipment, order_num)
         return "OK", 200
     except Exception as e:
-        
         return f"Processing error: {e}", 500
 @app.route("/zoho/webhook/invoice", methods=["POST"])
 def invoice_webhook():
