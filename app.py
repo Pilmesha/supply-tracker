@@ -388,7 +388,6 @@ def get_sheet_values(sheet_name: str):
 
     result = resp.json()
     return result.get("values", [])  # this is the list of rows
-
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
@@ -655,6 +654,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     print(f"✅ Appended {len(rows)} rows")
 
     # ------------------ color logic ------------------
+    from collections import defaultdict
 
     SUPPLIER_BASE_COLORS = {
         "KROHNE": (68,114,196), "Carl Roth": (255,0,0), "PENTAIR": (112,173,71),
@@ -665,33 +665,40 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         "VORTEX Water Engineering": (0,176,240), "KORHUS FILTER SYSTEMS": (172,185,202),
         "ToxSoft": (214,220,228), "NERO": (255,230,153), "AO Smith": (198,224,180)
     }
+    SUPPLIER_BASE_COLORS_CI = {k.upper(): v for k, v in SUPPLIER_BASE_COLORS.items()}
 
     supplier_so_map = defaultdict(dict)
     supplier_so_counter = defaultdict(int)
-
     row_colors = []
 
-    for _, r in out_df.iterrows():
-        supplier = r.get("Supplier Company", "")
+    # Build colors for all rows in out_df (the ones just appended)
+    for idx, r in out_df.iterrows():
+        # --- supplier: column or fallback to second cell ---
+        supplier = r.get("Supplier Company")
+        if not supplier or str(supplier).strip() == "":
+            supplier = r.iloc[1] if len(r) > 1 else ""
+        
+        supplier_key = str(supplier).strip().upper()  # normalize for case-insensitive lookup
         so = r.get("SO", "")
         
-        base = SUPPLIER_BASE_COLORS.get(supplier, (220,220,220))
+        # --- base color ---
+        base = SUPPLIER_BASE_COLORS_CI.get(supplier_key, (220,220,220))
         
-        if so not in supplier_so_map[supplier]:
-            supplier_so_counter[supplier] += 1
-            supplier_so_map[supplier][so] = supplier_so_counter[supplier]
+        # --- darker shade per SO ---
+        if so not in supplier_so_map[supplier_key]:
+            supplier_so_counter[supplier_key] += 1
+            supplier_so_map[supplier_key][so] = supplier_so_counter[supplier_key]
         
-        so_index = supplier_so_map[supplier][so]
+        so_index = supplier_so_map[supplier_key][so]
         adjustment = (so_index - 1) * 35
         
-        # Make each SO darker than the previous
         row_colors.append(
             tuple(max(0, min(255, int(c - adjustment))) for c in base)
         )
 
-    # ------------------ apply colors ------------------
-    start_row = last_row + 1
-
+    # ------------------ Apply Colors to Excel ------------------
+    # Determine first row of newly appended rows
+    start_row = last_row + 1  # last_row is from your table range before append
     for i, (r,g,b) in enumerate(row_colors):
         row_idx = start_row + i
         rng = f"{first_col}{row_idx}:{last_col}{row_idx}"
