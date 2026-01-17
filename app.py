@@ -51,6 +51,10 @@ MAILBOXES = [
     "Logistics@vortex.ge",
     "hach@vortex.ge"
 ]
+MAILBOXES_2 = [
+    "info@vortex.ge",
+    "teona@vortex.ge"
+]
 WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
 
@@ -797,7 +801,7 @@ def process_hach(df: pd.DataFrame) -> None:
             traceback.print_exc()
             raise
 
-def process_shipment(order_number: str) -> None:
+def process_shipment(order_number: str, items: list) -> None:
         try:
             # --- Load sheet values ---
             data = get_sheet_values("მიმდინარე ")
@@ -810,6 +814,8 @@ def process_shipment(order_number: str) -> None:
 
             # Build DataFrame safely
             df_source = pd.DataFrame(data[1:], columns=data[0])
+            df_source["Code"] = df_source["Code"].astype(str).str.strip()
+            df_source["შეკვეთილი რაოდენობა"] = df_source["შეკვეთილი რაოდენობა"]
 
             # --- Filter matching rows ---
             order_number = str(order_number).strip()
@@ -819,20 +825,39 @@ def process_shipment(order_number: str) -> None:
             if matching.empty:
                 print(f"⚠️ No rows found for SO = {order_number}")
                 return
+            rows_to_move = []
+            for idx, row in matching.iterrows():
+                sku = row["Code"]
+                qty_ordered = float(row["შეკვეთილი რაოდენობა"])
 
-            matching.loc[:, "ადგილმდებარეობა"] = "ჩაბარდა"
-            # --- Append only (no deletion) ---
-            append_dataframe_to_table(matching, "ჩამოსული")
+                # Find delivered item with same SKU
+                delivered_item = next((x for x in items if x["sku"].strip().upper() == sku.strip().upper()), None)
+                if delivered_item is not None:
+                    delivered_qty = float(delivered_item["quantity"])
+                else:
+                    delivered_qty = 0.0
 
+                if delivered_qty == qty_ordered:
+                    rows_to_move.append(idx)
+                else:
+                    print(f"⚠️ Row not fully delivered: SO={order_number}, SKU={sku}, Ordered={qty_ordered}, Delivered={delivered_qty}")
+            if not rows_to_move:
+                print(f"⚠️ No fully delivered rows for SO {order_number}")
+                return
+
+            # --- Prepare DataFrame to move ---
+            df_move = matching.loc[rows_to_move].copy()
+            df_move["ადგილმდებარეობა"] = "ჩაბარდა"
+
+            # --- Append to destination sheet ---
+            append_dataframe_to_table(df_move, "ჩამოსული")
+
+            # --- Delete moved rows from source ---
             start_row = get_table_start_row_from_used_range("მიმდინარე ")
-            table_row_indices = matching.index.tolist()
-            worksheet_rows = [start_row + 1 + idx for idx in table_row_indices]
-
-
-            # --- DELETE FROM THE TABLE ---
+            worksheet_rows = [start_row + 1 + idx for idx in rows_to_move]
             delete_table_rows("მიმდინარე ", worksheet_rows)
 
-            print(f"✅ Completed processing for SO {order_number}")
+            print(f"✅ Completed processing for SO {order_number}, moved {len(rows_to_move)} rows")
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
@@ -840,7 +865,6 @@ def process_shipment(order_number: str) -> None:
             traceback.print_exc()
 
 def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
-
     po_sheet = re.sub(r"\D", "", po_number).lstrip("00")
     print(f"📄 HACH sheet name: {po_sheet}")
     with EXCEL_LOCK:
@@ -1844,6 +1868,55 @@ def delivery_date_hach(salesorder_number: str, skus: list[str], delivery_start: 
             if file_stream:
                 file_stream.close()
             gc.collect()
+
+
+
+def send_email(customer_name:str, customer_mail:str, attachments):
+    #Customers who receive SPECIAL text
+    specials = {
+        "NEA","UWSCG", "Gardabani TPP", "Gardabani TPP 1"
+        "Gardabani TPP2","Georgian Technical University (GTU)","Batumi Water"
+    }
+
+    is_special = customer_name in specials
+    today_str = date.today().strftime("%d-%m-%Y") 
+    # ===== EMAIL CONTENT =====
+    if is_special:
+        print("SLAAYYY this is special")
+        subject = f"შეკვეთა დასრულებულია"
+        body = f"""
+        <p>მოგესალმებით,</p>
+        <p>გატყობინებთ, რომ {today_str}-ში მოხდა თქვენი შეკვეთის მოწოდება. ინფორმაცია მოწოდებული პროდუქციის შესახებ მოცემულია მიმაგრებულ ფაილში.</p>
+        <p>გთხოვთ, გამოგზავნოთ მიღება-ჩაბარების აქტი ხელმოსაწერად.</p>
+        <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“, 405310088.</p>
+        """
+    else:
+        print("NOT slay, not special")
+        subject = f"შეკვეთა დასრულებულია"
+        body = f"""
+        <p>მოგესალმებით,</p>
+        <p>გატყობინებთ, რომ {today_str}-ში მოხდა თქვენი შეკვეთის მოწოდება. ინფორმაცია მოწოდებული პროდუქციის შესახებ მოცემულია მიმაგრებულ ფაილში.</p>
+        <p>გთხოვთ, უზრუნველყოთ ანგარიშსწორება შეთანხმების მიხედვით.</p>
+        <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“, 405310088.</p>
+        """
+    for from_email in MAILBOXES_2:
+        r = requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail",
+            headers={
+                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+                "Content-Type": "application/json"
+            },
+            json={
+            "message": {
+                "subject": subject,
+                "body": {"contentType": "HTML", "content": body},
+                "toRecipients": [{"emailAddress": {"address": "nianozadze7@gmail.com"}}],
+                "attachments": attachments
+            },
+            "saveToSentItems": True
+        }
+        )
+        r.raise_for_status()  # will raise if sending fails
 # ==========ENDPOINTS========
 @app.route("/")
 def index():
@@ -1916,100 +1989,62 @@ def delivered_webhook():
     if not verify_zoho_signature(request, "shipmentorders"):
             return "Invalid signature", 403
     order_num = request.json.get("data", {}).get("sales_order_number")
+    package_num = request.json.get("data", {}).get("package_number")
+    package_id = request.json.get("data", {}).get("package_id")
     customer_name = request.json.get("data", {}).get("customer_name")
     customer_mail = request.json.get("data", {}).get("customer_mail")
     print(order_num)
     print(customer_name)
     print(customer_mail)
-    url = "https://www.zohoapis.com/inventory/v1/invoices"
     headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
     }
-    params = {
-        "organization_id": ORG_ID,
-        "salesorder_number": order_num
-    }
 
-    r = requests.get(url, headers=headers, params=params)
+    r = requests.get(
+        f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
+        headers=headers,
+        params={
+            "organization_id": ORG_ID,
+            "accept": "pdf"
+        }
+    )
+
     r.raise_for_status()
-
-    invoices = r.json().get("invoices", [])
-    if not invoices:
-        return None
-
-    invoice_id = invoices[0]["invoice_id"]
-    url = f"https://www.zohoapis.com/inventory/v1/invoices/{invoice_id}"
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
-    }
-    params = {
-        "organization_id": ORG_ID,
-        "accept": "pdf"
-    }
-
-    r = requests.get(url, headers=headers, params=params)
-    r.raise_for_status()
+    pdf_bytes = r.content
 
     attachments = []
-    if invoice_id:
+    if package_id:
         pdf_bytes = r.content
         pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
         attachments.append({
             "@odata.type": "#microsoft.graph.fileAttachment",
-            "name": f"Invoice_{order_num}.pdf",
+            "name": f"{package_num}.pdf",
             "contentType": "application/pdf",
             "contentBytes": pdf_base64
         })
-    # Customers who receive SPECIAL text
-    specials = {
-        "NEA","UWSCG", "Gardabani TPP", "Gardabani TPP 1"
-        "Gardabani TPP2","Georgian Technical University (GTU)","Batumi Water"
-    }
+        
+    response = requests.get(
+        f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
+        headers=headers,
+    )
+    response.raise_for_status()
+    receive = response.json().get("package", {})
+    # --- Extract line items ---
+    items = receive.get("line_items", [])
 
-    is_special = customer_name in specials
-    today_str = date.today().strftime("%d-%m-%Y") 
-    # ===== EMAIL CONTENT =====
-    if is_special:
-        print("SLAAYYY this is special")
-        subject = f"შეკვეთა დასრულებულია"
-        body = f"""
-        <p>მოგესალმებით,</p>
-        <p>გატყობინებთ, შპს „საქართველოს წყლის სისტემების“ მიერ ({today_str}) მოწოდებულ იქნა შეკვეთა.</p>
-        <p>გთხოვთ, გამოგზავნოთ მიღება-ჩაბარების აქტი ხელმოსაწერად.</p>
-        <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“</p>
-        """
-    else:
-        print("NOT slay, not special")
-        subject = f"შეკვეთა დასრულებულია - შეკვეთა {order_num}"
-        body = f"""
-        <p>მოგესალმებით,</p>
-        <p>გატყობინებთ, შპს „საქართველოს წყლის სისტემების“ მიერ ({today_str}) მოწოდებულია შეკვეთა, (შეკვეთის ნომერი: {order_num})</p>
-        <p>გთხოვთ, უზრუნველყოთ ანგარიშსწორება შეთანხმების მიხედვით.</p>
-        <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“</p>
-        """
-    # for from_email in MAILBOXES:
-    #     r = requests.post(
-    #         f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail",
-    #         headers={
-    #             "Authorization": f"Bearer {ACCESS_TOKEN or refresh_access_token()}",
-    #             "Content-Type": "application/json"
-    #         },
-    #         json={
-    #         "message": {
-    #             "subject": subject,
-    #             "body": {"contentType": "HTML", "content": body},
-    #             "toRecipients": [{"emailAddress": {"address": customer_mail}}],
-    #             "attachments": attachments
-    #         },
-    #         "saveToSentItems": True
-    #     }
-    #     )
-    #     r.raise_for_status()  # will raise if sending fails
-
+    email_future = POOL.submit(send_email, customer_name, customer_mail, attachments)
+    process_future = POOL.submit(process_shipment, order_num, items)
     try:
-        POOL.submit(process_shipment, order_num)
+        # Get results or raise exceptions
+        email_result = email_future.result(timeout=30)
+        process_result = process_future.result(timeout=30)
         return "OK", 200
     except Exception as e:
+        # Log which task failed
+        if email_future.exception():
+            print(f"Email sending failed: {email_future.exception()}")
+        if process_future.exception():
+            print(f"Process shipment failed: {process_future.exception()}")
         return f"Processing error: {e}", 500
 @app.route("/zoho/webhook/invoice", methods=["POST"])
 def invoice_webhook():
