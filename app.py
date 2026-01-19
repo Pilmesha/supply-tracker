@@ -235,17 +235,13 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     letter_stream = download_excel(PERMS_ID)
 
     # --- HS codes ---
-    hs_raw = pd.read_excel(hs_stream, sheet_name="Pricelist_neu", header=0)
-    hs_df = hs_raw.iloc[:, [0, 24]].copy()
-    hs_df.columns = ["Code", "HS Code"]
+    hs_df = pd.read_excel(hs_stream, header=[0,1])
+    hs_work = hs_df.loc[:, [1, 16, 19, 25]].copy()
 
-    hs_df["Code"] = hs_df["Code"].astype(str).str.strip()
-    hs_df["HS Code"] = (
-        hs_df["HS Code"]
-        .astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
-    )
+    # Rename internally to match your existing logic
+    hs_work.columns = ["Code", "GL ID", "ID", "HS Code"]
+    hs_work["Code"] = hs_work["Code"].astype(str).str.strip()
+    hs_work["HS Code"] = (hs_work["HS Code"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
     # --- Permissions ---
     letter_df = pd.read_excel(letter_stream, header=1)
     letter_stream.close()
@@ -259,26 +255,39 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         letter_df = pd.DataFrame(columns=["მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"])
+
     # --- Ensure all target columns exist ---
     for col in table_cols:
         if col not in df.columns:
             df[col] = ""
+
     # --- Normalize Code once ---
     df["Code"] = df["Code"].astype(str).str.strip()
+
     # --- Build lookups ---
     hs_lookup = (
-        hs_df
+        hs_work
         .drop_duplicates(subset="Code")
         .set_index("Code")["HS Code"]
     )
+
     perm_lookup = (
         letter_df
         .drop_duplicates(subset="მწარმოებლის კოდი")
         .set_index("მწარმოებლის კოდი")["მიღებული ნებართვა 1 / წერილის ნომერი"]
     )
+    is_reag = hs_work[(hs_work['ID'] == "Chemistry") & (hs_work["GL ID"] == "Chemical")]
+    reag_codes = set(is_reag["Code"].astype(str).str.strip())
     # --- Fill EXISTING columns only ---
     df["HS Code"] = df["Code"].map(hs_lookup)
-    df["წერილი"] = df["Code"].map(perm_lookup).fillna("არ სჭირდება")
+    df["წერილი"] = df["Code"].map(perm_lookup)
+    mask_reag_no_letter = (
+        df["Code"].isin(reag_codes) &
+        df["წერილი"].isna()
+    )
+    df.loc[mask_reag_no_letter, "წერილი"] = "შესატანია"
+    # non-reagent + no letter → "არ სჭირდება"
+    df["წერილი"] = df["წერილი"].fillna("არ სჭირდება")
     # --- Final column order ---
     df = df[table_cols]
     return df.fillna("").astype(str)
