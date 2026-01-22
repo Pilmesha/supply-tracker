@@ -7,9 +7,7 @@ from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from pytz import timezone
-from pathlib import Path
-from collections import defaultdict
+import string
 load_dotenv()
 
 #======CONGIF=====
@@ -57,7 +55,7 @@ MAILBOXES_2 = [
 ]
 WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
-
+PUNCT_TABLE = str.maketrans("", "", ".,;:()[]{}")
 app = Flask(__name__)
 
 
@@ -246,7 +244,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     letter_df = pd.read_excel(letter_stream, header=1)
     letter_stream.close()
     trans = pd.read_csv("translations.csv")
-    trans["_key"] = (trans["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
+    trans["_key"] = (trans["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.translate(PUNCT_TABLE).str.replace(r"\s+", " ", regex=True).str.strip())
 
     trans["თარგმანი"] = trans["თარგმანი"].astype(str).str.strip()
 
@@ -297,8 +295,10 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     # --- Final column order ---
     df = df[table_cols]
     if "Details" in df.columns and "თარგმანი" in df.columns:
-        df["_key"] = (df["Details"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
-        df["თარგმანი"] = (df["_key"].map(translation_lookup).fillna(df["თარგმანი"]).fillna(""))
+        df["_key"] = (df["Details"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.translate(PUNCT_TABLE).str.split().str.join(" "))
+
+        df["თარგმანი"] = (df["_key"].map(translation_lookup).fillna(df["თარგმანი"]))
+
         df.drop(columns="_key", inplace=True)
     return df.fillna("").astype(str)
 def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
@@ -524,7 +524,15 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,df: pd.DataFrame,table
         ).raise_for_status()
 
     print("🎨 Full HACH sheet formatting applied")
-
+def normalize_text(text):
+    if pd.isna(text):
+        return ""
+    text = str(text)
+    # Remove punctuation and special characters
+    text = re.sub(r'[.,"\'\n\r\t!?;:-]', '', text)
+    # Normalize whitespace and convert to lowercase for case-insensitive matching
+    text = ' '.join(text.split()).lower().strip()
+    return text
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
@@ -709,10 +717,11 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
     items_df = pd.read_csv("zoho_items.csv")
     trans = pd.read_csv("translations.csv")
-    # normalize Item for matching
-    trans["_key"] = (trans["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
-    trans["თარგმანი"] = trans["თარგმანი"].astype(str).str.strip()
-    translation_lookup = trans.set_index("_key")["თარგმანი"]
+    trans_lookup = {}
+    for _, row in trans.iterrows():
+        if pd.notna(row['Item']) and pd.notna(row['თარგმანი']):
+            normalized_item = str(row['Item']).translate(str.maketrans('', '', '.,\n\r\t')).lower().strip()
+            trans_lookup[normalized_item] = row['თარგმანი']
     # Ensure table exists
     range_address = get_used_range(sheet_name)
     table_name = create_table_if_not_exists(range_address, sheet_name)
@@ -744,10 +753,6 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
     items_df["sku"] = items_df["sku"].astype(str).str.strip()
     perms_df["მწარმოებლის კოდი"] = perms_df["მწარმოებლის კოდი"].astype(str).str.strip()
-    if "თარგმანი" in out_df.columns and "Item" in out_df.columns:
-        out_df["_key"] = (out_df["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
-        out_df["თარგმანი"] = (out_df["_key"].map(translation_lookup).fillna(out_df["თარგმანი"]).fillna(""))
-        out_df.drop(columns="_key", inplace=True)
     # HS Code lookup: sku -> HS_Code
     hs_lookup = (
         items_df
@@ -769,6 +774,14 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         .map(perm_lookup)
         .fillna("არ სჭირდება")
     )
+    def get_translation(item):
+        if pd.isna(item):
+            return ""
+        # Normalize the item text by removing punctuation
+        normalized = str(item).translate(str.maketrans('', '', '.,\n\r\t')).lower().strip()
+        return trans_lookup.get(normalized, "")
+    
+    out_df["თარგმანი"] = out_df["Item"].apply(get_translation)
     # --------------------------------------------------
     # 3️⃣ Final export
     # --------------------------------------------------
