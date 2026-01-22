@@ -244,11 +244,18 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     letter_df = pd.read_excel(letter_stream, header=1)
     letter_stream.close()
     trans = pd.read_csv("translations.csv")
-    trans["_key"] = (trans["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.translate(PUNCT_TABLE).str.replace(r"\s+", " ", regex=True).str.strip())
-
-    trans["თარგმანი"] = trans["თარგმანი"].astype(str).str.strip()
-
-    translation_lookup = trans.set_index("_key")["თარგმანი"]
+    trans_lookup = {}
+    for _, row in trans.iterrows():
+        if pd.notna(row['Item']) and pd.notna(row['თარგმანი']):
+            # Normalize item by removing punctuation
+            normalized_item = str(row['Item']).translate(str.maketrans('', '', '.,\n\r\t')).lower().strip()
+            trans_lookup[normalized_item] = row['თარგმანი']
+    def get_translation(item):
+        if pd.isna(item):
+            return ""
+        # Normalize the item text by removing punctuation
+        normalized = str(item).translate(str.maketrans('', '', '.,\n\r\t')).lower().strip()
+        return trans_lookup.get(normalized, "")
 
     if {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(letter_df.columns):
         letter_df = letter_df[
@@ -293,13 +300,9 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     # non-reagent + no letter → "არ სჭირდება"
     df["წერილი"] = df["წერილი"].fillna("არ სჭირდება")
     # --- Final column order ---
+    # --- Fill translations for Details column ---
+    df["თარგმანი"] = df["Details"].apply(get_translation)
     df = df[table_cols]
-    if "Details" in df.columns and "თარგმანი" in df.columns:
-        df["_key"] = (df["Details"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.translate(PUNCT_TABLE).str.split().str.join(" "))
-
-        df["თარგმანი"] = (df["_key"].map(translation_lookup).fillna(df["თარგმანი"]))
-
-        df.drop(columns="_key", inplace=True)
     return df.fillna("").astype(str)
 def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
     blocks = {}
@@ -524,15 +527,7 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,df: pd.DataFrame,table
         ).raise_for_status()
 
     print("🎨 Full HACH sheet formatting applied")
-def normalize_text(text):
-    if pd.isna(text):
-        return ""
-    text = str(text)
-    # Remove punctuation and special characters
-    text = re.sub(r'[.,"\'\n\r\t!?;:-]', '', text)
-    # Normalize whitespace and convert to lowercase for case-insensitive matching
-    text = ' '.join(text.split()).lower().strip()
-    return text
+
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
