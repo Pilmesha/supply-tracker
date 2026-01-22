@@ -245,6 +245,12 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     # --- Permissions ---
     letter_df = pd.read_excel(letter_stream, header=1)
     letter_stream.close()
+    trans = pd.read_csv("translations.csv")
+    trans["_key"] = (trans["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
+
+    trans["თარგმანი"] = trans["თარგმანი"].astype(str).str.strip()
+
+    translation_lookup = trans.set_index("_key")["თარგმანი"]
 
     if {"მწარმოებლის კოდი", "მიღებული ნებართვა 1 / წერილის ნომერი"}.issubset(letter_df.columns):
         letter_df = letter_df[
@@ -290,6 +296,10 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     df["წერილი"] = df["წერილი"].fillna("არ სჭირდება")
     # --- Final column order ---
     df = df[table_cols]
+    if "Details" in df.columns and "თარგმანი" in df.columns:
+        df["_key"] = (df["Details"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
+        df["თარგმანი"] = (df["_key"].map(translation_lookup).fillna(df["თარგმანი"]).fillna(""))
+        df.drop(columns="_key", inplace=True)
     return df.fillna("").astype(str)
 def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
     blocks = {}
@@ -698,6 +708,11 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         return
 
     items_df = pd.read_csv("zoho_items.csv")
+    trans = pd.read_csv("translations.csv")
+    # normalize Item for matching
+    trans["_key"] = (trans["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
+    trans["თარგმანი"] = trans["თარგმანი"].astype(str).str.strip()
+    translation_lookup = trans.set_index("_key")["თარგმანი"]
     # Ensure table exists
     range_address = get_used_range(sheet_name)
     table_name = create_table_if_not_exists(range_address, sheet_name)
@@ -729,7 +744,10 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
     items_df["sku"] = items_df["sku"].astype(str).str.strip()
     perms_df["მწარმოებლის კოდი"] = perms_df["მწარმოებლის კოდი"].astype(str).str.strip()
-
+    if "თარგმანი" in out_df.columns and "Item" in out_df.columns:
+        out_df["_key"] = (out_df["Item"].astype(str).str.lower().str.replace("\n", " ", regex=False).str.replace(r"[.,;:()\[\]{}]", "", regex=True).str.replace(r"\s+", " ", regex=True).str.strip())
+        out_df["თარგმანი"] = (out_df["_key"].map(translation_lookup).fillna(out_df["თარგმანი"]).fillna(""))
+        out_df.drop(columns="_key", inplace=True)
     # HS Code lookup: sku -> HS_Code
     hs_lookup = (
         items_df
