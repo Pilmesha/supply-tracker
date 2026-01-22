@@ -1367,7 +1367,7 @@ def process_message(mailbox, message_id, message_date):
 
                     # Fill confirmation date
                     if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
-                        orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = message_date
+                        orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = confirmation_date
                         print("   Filled confirmation date")
             if updated_rows == 0:
                 print("⚠️ No matching item codes found in this confirmation message.")
