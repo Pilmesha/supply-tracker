@@ -302,6 +302,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     # --- Final column order ---
     # --- Fill translations for Details column ---
     df["თარგმანი"] = df["Details"].apply(get_translation)
+    df['მდებარეობა'] = "გერმანია"
     df = df[table_cols]
     return df.fillna("").astype(str)
 def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
@@ -1073,6 +1074,7 @@ def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
 
         df = pd.DataFrame(data[1:], columns=data[0])
         df["რეალური ჩამოსვლის თარიღი"] = (pd.to_datetime(date) - pd.Timedelta(days=2)).date()
+        df['მდებარეობა'] = "ოფისი"
         # Normalize Details column
         if "Details" not in df.columns or "Qty Delivered" not in df.columns:
             print("❌ Required columns not found (Details / Qty Delivered)")
