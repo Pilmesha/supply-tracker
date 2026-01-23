@@ -383,25 +383,32 @@ def extract_po_k_mapping(pdf_text: str) -> dict:
     po_matches = list(po_pattern.finditer(pdf_text))
     mapping = {}
 
+    if not po_matches:
+        print("❌ No PO numbers found in text")
+        return mapping
+
+    # Find all Ks in the document
+    all_k = k_pattern.findall(pdf_text)
+    first_k = all_k[0].upper() if all_k else None
+
     for idx, po in enumerate(po_matches):
         po_digits = str(int(po.group(1)))
         block_start = po.end()
 
         # block ends at next PO or end of document
-        block_end = (
-            po_matches[idx + 1].start()
-            if idx + 1 < len(po_matches)
-            else len(pdf_text)
-        )
-
+        block_end = po_matches[idx + 1].start() if idx + 1 < len(po_matches) else len(pdf_text)
         po_block = pdf_text[block_start:block_end]
 
-        # Find FIRST K inside this PO block
+        # Try to find K inside the PO block
         k_match = k_pattern.search(po_block)
         if k_match:
             mapping[po_digits] = k_match.group(0).upper()
+        elif first_k:
+            # fallback to first K in the document
+            mapping[po_digits] = first_k
+            print(f"⚠️ No K found inside PO-{po_digits} block, using first K in document")
         else:
-            print(f"⚠️ No K found inside PO-{po_digits} block")
+            print(f"⚠️ No K found for PO-{po_digits} anywhere")
 
     return mapping
 def get_sheet_values(sheet_name: str):
