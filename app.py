@@ -331,36 +331,42 @@ def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
     return blocks
 def graph_safe_request(method, url, headers, json=None, max_retries=5):
     last_resp = None
+
     for attempt in range(max_retries):
         try:
-            resp = requests.request(method, url, headers=headers, json=json)
+            resp = safe_request(
+                method,
+                url,
+                headers=headers,
+                json=json,
+                timeout=30
+            )
             last_resp = resp
-
             status = resp.status_code
 
-            # SUCCESS
             if status < 400:
                 return resp
 
-            # Non-retryable 4xx (except 423/429)
             if status not in (423, 429) and status < 500:
                 resp.raise_for_status()
-                return resp
 
-            # Retryable errors: 423, 429, or 5xx
-            if status in (423, 429) or status >= 500:
-                print(
-                    f"⚠️ Graph busy (HTTP {status}), retry {attempt + 1}/{max_retries}"
-                )
-                time.sleep(1 + attempt * 1.5)
-                continue
+            print(
+                f"⚠️ Graph busy (HTTP {status}), retry {attempt + 1}/{max_retries}"
+            )
+            time.sleep(1 + attempt * 1.5)
+
+        except requests.Timeout:
+            print(
+                f"⏱️ Graph timeout, retry {attempt + 1}/{max_retries}"
+            )
+            time.sleep(1 + attempt * 1.5)
 
         except requests.RequestException as e:
             print(
                 f"⚠️ Graph exception: {e}, retry {attempt + 1}/{max_retries}"
             )
             time.sleep(1 + attempt * 1.5)
-            continue
+
     print(f"❌ Graph failed after {max_retries} retries")
 
     if last_resp is not None:
@@ -2061,7 +2067,7 @@ def send_email(customer_name:str, customer_mail:str, attachments):
         <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“, 405310088.</p>
         """
     for from_email in MAILBOXES_2:
-        r = requests.post(
+        r = HTTP.post(
             f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail",
             headers={
                 "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
@@ -2122,7 +2128,7 @@ def receive_webhook():
         headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
         }
-        response = requests.get(url, headers=headers)
+        response = HTTP.get(url, headers=headers)
         response.raise_for_status()
 
         receive = response.json().get("purchasereceive", {})
@@ -2161,7 +2167,7 @@ def delivered_webhook():
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
     }
 
-    r = requests.get(
+    r = requests.HTTP(
         f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
         headers=headers,
         params={
@@ -2184,7 +2190,7 @@ def delivered_webhook():
             "contentBytes": pdf_base64
         })
         
-    response = requests.get(
+    response = HTTP.get(
         f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
         headers=headers,
     )
