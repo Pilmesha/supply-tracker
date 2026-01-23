@@ -916,7 +916,8 @@ def process_hach(df: pd.DataFrame) -> None:
                 print(f"   ➕ Added batch {i // batch_size + 1}")
 
             print(f"✅ HACH workflow completed. Added {len(rows)} rows.")
-            format_hach_sheet_full(sheet_name=sheet_name,start_row=start_row,row_count=len(normalized_df), table_id=table_id)
+            POOL.submit(format_hach_sheet_full, sheet_name,start_row, len(normalized_df), table_id)
+            #format_hach_sheet_full(sheet_name=sheet_name,start_row=start_row,row_count=len(normalized_df), table_id=table_id)
 
         except Exception as e:
             print(f"❌ HACH processing failed: {e}")
