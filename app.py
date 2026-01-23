@@ -417,50 +417,23 @@ def get_sheet_values(sheet_name: str):
 
     result = resp.json()
     return result.get("values", [])  # this is the list of rows
-def format_hach_sheet_full(sheet_name: str,start_row: int,df: pd.DataFrame,table_id: str) -> None:
+def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_id: str) -> None:
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
         "Content-Type": "application/json"
     }
 
-    row_count = len(df)
     last_row = start_row + row_count
+    table_range = f"B{start_row}:T{last_row}"
+    data_range  = f"B{start_row + 1}:T{last_row}"
 
-    # ----------------------------
-    # 1. INFO BLOCK (C3:D6)
-    # ----------------------------
-    info_range = "C3:D6"
-
-    # Alignment
+    base_url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
+        f"/items/{HACH_FILE}/workbook"
+    )
     graph_safe_request(
         "PATCH",
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-        f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format",
-        headers,
-        {"verticalAlignment": "Center", "horizontalAlignment": "Left"}
-    ).raise_for_status()
-
-    # Borders
-    for edge in [
-        "EdgeTop", "EdgeBottom", "EdgeLeft",
-        "EdgeRight", "InsideHorizontal", "InsideVertical"
-    ]:
-        graph_safe_request(
-            "PATCH",
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-            f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
-            f"/format/borders/{edge}",
-            headers,
-            {"style": "Continuous", "weight": "Thin", "color": "#000000"}
-        ).raise_for_status()
-
-    # ----------------------------
-    # 2. TABLE STYLE (HEADER LOOK)
-    # ----------------------------
-    graph_safe_request(
-        "PATCH",
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-        f"/workbook/tables/{table_id}",
+        f"{base_url}/tables/{table_id}",
         headers,
         {
             "style": "TableStyleMedium2",
@@ -469,15 +442,13 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,df: pd.DataFrame,table
         }
     ).raise_for_status()
 
-    # ----------------------------
-    # 3. DATA ROW ALIGNMENT
-    # ----------------------------
-    data_range = f"B{start_row + 1}:T{last_row}"
-
+    # -------------------------------------------------
+    # 2. Format ALL data cells at once
+    # -------------------------------------------------
     graph_safe_request(
         "PATCH",
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-        f"/workbook/worksheets/{sheet_name}/range(address='{data_range}')/format",
+        f"{base_url}/worksheets/{sheet_name}"
+        f"/range(address='{data_range}')/format",
         headers,
         {
             "horizontalAlignment": "Center",
@@ -486,36 +457,21 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,df: pd.DataFrame,table
         }
     ).raise_for_status()
 
-    # ----------------------------
-    # 4. WRAP DETAILS COLUMN ONLY
-    # ----------------------------
+    # -------------------------------------------------
+    # 3. Set row height ONCE
+    # -------------------------------------------------
     graph_safe_request(
         "PATCH",
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-        f"/workbook/worksheets/{sheet_name}"
-        f"/range(address='{sheet_name}!F{start_row + 1}:F{last_row}')/format",
-        headers,
-        {"wrapText": True}
-    ).raise_for_status()
-
-    # ----------------------------
-    # 5. ROW HEIGHT (DATA ROWS)
-    # ----------------------------
-    data_rows_range = f"{sheet_name}!{start_row + 1}:{last_row}"
-
-    graph_safe_request(
-        "PATCH",
-        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-        f"/workbook/worksheets/{sheet_name}"
-        f"/range(address='{data_rows_range}')/format",
+        f"{base_url}/worksheets/{sheet_name}"
+        f"/range(address='{sheet_name}!{start_row + 1}:{last_row}')/format",
         headers,
         {"rowHeight": 35}
     ).raise_for_status()
 
-    # ----------------------------
-    # 6. COLUMN WIDTHS
-    # ----------------------------
-    column_widths = {
+    # -------------------------------------------------
+    # 4. Set column widths in ONE call (grouped)
+    # -------------------------------------------------
+    width_map = {
         "B": 45, "C": 120, "D": 110, "E": 110,
         "F": 300, "G": 140, "H": 60, "I": 120,
         "J": 160, "K": 160, "L": 180, "M": 160,
@@ -523,17 +479,16 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,df: pd.DataFrame,table
         "R": 120, "S": 140, "T": 200
     }
 
-    for col, width in column_widths.items():
+    for col, width in width_map.items():
         graph_safe_request(
             "PATCH",
-            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-            f"/workbook/worksheets/{sheet_name}"
+            f"{base_url}/worksheets/{sheet_name}"
             f"/range(address='{sheet_name}!{col}:{col}')/format",
             headers,
             {"columnWidth": width}
         ).raise_for_status()
 
-    print("🎨 Full HACH sheet formatting applied")
+    print("🎨 Compact HACH formatting applied")
 
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
@@ -903,7 +858,7 @@ def process_hach(df: pd.DataFrame) -> None:
                 ["PO", po_number],
                 ["SO", df["Reference"].iloc[0] if "Reference" in df else ""],
                 ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
-                ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")]
+                ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%d-%m-%Y")]
             ]
 
             graph_safe_request("PATCH",
@@ -961,7 +916,7 @@ def process_hach(df: pd.DataFrame) -> None:
                 print(f"   ➕ Added batch {i // batch_size + 1}")
 
             print(f"✅ HACH workflow completed. Added {len(rows)} rows.")
-            format_hach_sheet_full(sheet_name=sheet_name,start_row=start_row,df=normalized_df,table_id=table_id)
+            format_hach_sheet_full(sheet_name=sheet_name,start_row=start_row,row_count=len(normalized_df), table_id=table_id)
 
         except Exception as e:
             print(f"❌ HACH processing failed: {e}")
