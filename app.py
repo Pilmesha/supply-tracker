@@ -431,16 +431,29 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
         f"/items/{HACH_FILE}/workbook"
     )
+    # ---------------------------- # 1. INFO BLOCK (C3:D6) # ---------------------------- 
+    # Alignment
     graph_safe_request(
         "PATCH",
-        f"{base_url}/tables/{table_id}",
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+        f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format",
         headers,
-        {
-            "style": "TableStyleMedium2",
-            "showFilterButton": True,
-            "showBandedRows": True
-        }
+        {"verticalAlignment": "Center", "horizontalAlignment": "Left"}
     ).raise_for_status()
+
+    # Borders
+    for edge in [
+        "EdgeTop", "EdgeBottom", "EdgeLeft",
+        "EdgeRight", "InsideHorizontal", "InsideVertical"
+    ]:
+        graph_safe_request(
+            "PATCH",
+            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+            f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
+            f"/format/borders/{edge}",
+            headers,
+            {"style": "Continuous", "weight": "Thin", "color": "#000000"}
+        ).raise_for_status()
 
     # -------------------------------------------------
     # 2. Format ALL data cells at once
@@ -487,13 +500,6 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
             headers,
             {"columnWidth": width}
         ).raise_for_status()
-    # 5. Info block border
-    graph_safe_request(
-    "PATCH",
-    f"{base_url}/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/outline",
-    headers,
-    {"style": "Continuous", "weight": "Thin", "color": "#000000"}
-    ).raise_for_status()
     print("🎨 HACH formatting applied")
 
 # =========== MAIN LOGIC ==========
