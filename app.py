@@ -424,7 +424,7 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
     }
 
     last_row = start_row + row_count
-    table_range = f"B{start_row}:T{last_row}"
+    info_range  = "C3:D6"
     data_range  = f"B{start_row + 1}:T{last_row}"
 
     base_url = (
@@ -487,8 +487,14 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
             headers,
             {"columnWidth": width}
         ).raise_for_status()
-
-    print("🎨 Compact HACH formatting applied")
+    # 5. Info block border
+    graph_safe_request(
+    "PATCH",
+    f"{base_url}/worksheets/{sheet_name}/range(address='{info_range}')/format/borders/outline",
+    headers,
+    {"style": "Continuous", "weight": "Thin", "color": "#000000"}
+    ).raise_for_status()
+    print("🎨 HACH formatting applied")
 
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
@@ -858,7 +864,7 @@ def process_hach(df: pd.DataFrame) -> None:
                 ["PO", po_number],
                 ["SO", df["Reference"].iloc[0] if "Reference" in df else ""],
                 ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
-                ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%d-%m-%Y")]
+                ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%d/%m/%Y")]
             ]
 
             graph_safe_request("PATCH",
