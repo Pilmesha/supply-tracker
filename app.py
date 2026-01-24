@@ -508,7 +508,27 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
             {"columnWidth": width}
         ).raise_for_status()
     print("🎨 HACH formatting applied")
+def load_hach_reference_values() -> set[str]:
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_HS}/content"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"
+    }
 
+    resp = HTTP.get(url, headers=headers, timeout=60)
+    resp.raise_for_status()
+
+    wb = load_workbook(io.BytesIO(resp.content), read_only=True)
+    ws = wb.active  # assume first sheet
+
+    hach_values = set()
+
+    for row in ws.iter_rows(min_row=1):
+        cell = row[0].value  # FIRST COLUMN
+        if cell:
+            hach_values.add(str(cell).strip().upper())
+
+    wb.close()
+    return hach_values
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
@@ -1902,7 +1922,14 @@ def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_star
                 file_stream.close()
             gc.collect()
 
-def delivery_date_hach(salesorder_number: str, skus: list[str], delivery_start: str, delivery_end: str) -> None:
+def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: str, skus: list[str]) -> None:
+    skus = {s.strip().upper() for s in skus}  # normalize once
+    delivery_range = (
+        delivery_start
+        if delivery_start == delivery_end
+        else f"{delivery_start} - {delivery_end}"
+    )
+
     with EXCEL_LOCK:
         file_stream = None
         wb = None
@@ -1929,30 +1956,19 @@ def delivery_date_hach(salesorder_number: str, skus: list[str], delivery_start: 
                 print("❌ Failed to download HACH Excel")
                 return
 
-            # --- Step 2: Find matching sheet by scanning for SO ---
+            # --- Step 2: Find matching sheet by SO number in D4 ---
             target_ws = None
 
             for sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]
-
-                # Scan first 20 rows only (SO is always at the top)
-                for row in ws.iter_rows(min_row=1, max_row=20):
-                    for idx, cell in enumerate(row):
-                        if str(cell.value).strip().upper() == "SO":
-                            # Check cell to the right
-                            if idx + 1 < len(row):
-                                right_cell = row[idx + 1]
-                                if str(right_cell.value).strip() == salesorder_number:
-                                    target_ws = ws
-                                    print(f"📄 HACH sheet matched: '{sheet_name}'")
-                                    break
-                    if target_ws:
-                        break
-                if target_ws:
+                cell_value = ws["D4"].value
+                if cell_value and str(cell_value).strip() == salesorder_number:
+                    target_ws = ws
+                    print(f"📄 HACH sheet matched: '{sheet_name}' (SO found in D4)")
                     break
 
             if not target_ws:
-                print(f"⚠️ SO {salesorder_number} not found in any HACH sheet")
+                print(f"⚠️ SO {salesorder_number} not found in any HACH sheet (checked D4)")
                 return
 
             # --- Step 3: Locate 'მიწოდების ვადა' column ---
@@ -1971,16 +1987,29 @@ def delivery_date_hach(salesorder_number: str, skus: list[str], delivery_start: 
             if not delivery_col_idx:
                 raise ValueError("❌ Column 'მიწოდების ვადა' not found in HACH sheet")
 
-            # --- Step 4: Write delivery date ---
-            # Convention: write value directly under header
-            ## To be continued
-            target_ws.cell(row=header_row + 1, column=delivery_col_idx).value = f"{delivery_start} – {delivery_end}"
-            # if delivery_start == delivery_end:
-            #     target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = delivery_start
-            # else:
-            #     target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = (
-            #         f"{delivery_start} – {delivery_end}"
-            #     )
+            # --- Step 4: Write delivery date PER SKU (Code in D, Delivery in I) ---
+            start_row = 9          # data starts under headers
+            code_col_idx = 4       # D
+            delivery_col_idx = 9   # I
+
+            for row_idx in range(start_row, target_ws.max_row + 1):
+                code_cell = target_ws.cell(row=row_idx, column=code_col_idx).value
+
+                if not code_cell:
+                    continue
+
+                code = str(code_cell).strip().upper()
+
+                if code in skus or code == "COO":
+                    target_ws.cell(
+                        row=row_idx,
+                        column=delivery_col_idx
+                    ).value = delivery_range
+                else:
+                    target_ws.cell(
+                        row=row_idx,
+                        column=delivery_col_idx
+                    ).value = None
 
             # --- Step 5: Save & upload ---
             output = io.BytesIO()
@@ -1991,6 +2020,7 @@ def delivery_date_hach(salesorder_number: str, skus: list[str], delivery_start: 
 
             for attempt in range(10):
                 resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+
                 if resp.status_code in (423, 409):
                     wait = min(30, 2 ** attempt)
                     print(f"⚠️ HACH file locked, retrying in {wait}s")
@@ -2268,50 +2298,35 @@ def invoice_webhook():
     start_str = start_date.strftime("%d/%m/%y")
     end_str = end_date.strftime("%d/%m/%y")
 
-    # 5️⃣ Split items by HACH / NON-HACH (ITEM LEVEL)
-    non_hach_skus = []
+    # 5️⃣ Split items by HACH / NON-HACH (EXCEL-BASED)
     hach_skus = []
-    has_hach_items = False
+    non_hach_skus = []
+
+    hach_reference = load_hach_reference_values()  # Excel first column → SET
 
     for item in so_detail.get("line_items", []):
         sku = item.get("sku")
-        created_by_email = (item.get("created_by_email") or "").lower()
+        code = item.get("custom_field_hash", {}).get("cf_code")
 
-        if not sku:
+        if not sku or not code:
             continue
 
-        if "hach" in created_by_email:
-            has_hach_items = True
+        normalized_code = str(code).strip().upper()
+
+        if normalized_code in hach_reference:
             hach_skus.append(sku.upper())
         else:
             non_hach_skus.append(sku.upper())
 
     # 6️⃣ Update NON-HACH (SO + SKU)
     if non_hach_skus:
-        delivery_date_nonhach(
-            salesorder_number=so_number,
-            skus=non_hach_skus,
-            delivery_start=start_str,
-            delivery_end=end_str
-        )
+        POOL.submit(delivery_date_nonhach, so_number, non_hach_skus, start_str, end_str)
 
     # 7️⃣ Update HACH (sheet discovery by SO inside sheet)
     if hach_skus:
-        delivery_date_hach(
-            salesorder_number=so_number,
-            skus=hach_skus,
-            delivery_start=start_str,
-            delivery_end=end_str
-        )
+        POOL.submit(delivery_date_hach,  so_number, start_str, end_str, hach_skus)
 
-    return jsonify({
-        "ok": True,
-        "salesorder": so_number,
-        "delivery_start": start_str,
-        "delivery_end": end_str,
-        "non_hach_skus": non_hach_skus,
-        "hach_present": has_hach_items
-    }), 200
+    return "OK", 200
 
 # ===========MAIL PROCESSING============
 def safe_request(method, url, **kwargs):
