@@ -1300,6 +1300,37 @@ def process_message(mailbox, message_id, message_date):
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
     print(f"message_date: {message_date}")
+    att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+    att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
+    if att_resp.status_code != 200:
+        print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
+        return
+
+    attachments = att_resp.json().get("value", [])
+
+    # ✅ Check for exactly one PDF
+    pdf_attachments = [
+        att for att in attachments
+        if att.get("name", "").lower().endswith(".pdf") or att.get("contentType") == "application/pdf"
+    ]
+
+    if len(pdf_attachments) != 1:
+        print(f"ℹ️ Not a logistics mail (PDF count = {len(pdf_attachments)}) → skipping")
+        return
+    
+    if "contentBytes" not in att:
+        print("❌ Attachment has no contentBytes - skipping")
+        return
+    # --- 2. Loop over attachments, decode and extract text directly ---
+    all_text = ""
+    att = pdf_attachments[0]
+    content = base64.b64decode(att['contentBytes'])
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        for page in pdf.pages:
+            all_text += (page.extract_text() or "") + "\n"
+        # --- 3. Extract PO number (first occurrence) ---
+    po_match = re.search(r"PO-\d+", all_text)
+    po_number = po_match.group(0) if po_match else None
     if isinstance(message_date, str):
         dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
     elif isinstance(message_date, datetime):
@@ -1307,7 +1338,10 @@ def process_message(mailbox, message_id, message_date):
     else:
         print(f"⚠️ Unexpected message_date type: {type(message_date)}")
         return
-    confirmation_date = dt.date() 
+    confirmation_date = dt.date()
+    if not po_number:
+        print("ℹ️ No PO found in PDF → skipping Excel update")
+        return
     with EXCEL_LOCK:
         file_stream = None
         wb = None
@@ -1344,40 +1378,6 @@ def process_message(mailbox, message_id, message_date):
         else:
             print("❌ Gave up downloading files after multiple attempts")
             return
-        att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
-        att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
-        if att_resp.status_code != 200:
-            print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
-            return
-
-        attachments = att_resp.json().get("value", [])
-
-        # ✅ Check for exactly one PDF
-        pdf_attachments = [
-            att for att in attachments
-            if att.get("name", "").lower().endswith(".pdf") or att.get("contentType") == "application/pdf"
-        ]
-
-        if len(pdf_attachments) != 1:
-            print(f"❌ Expected 1 PDF attachment, found {len(pdf_attachments)} - skipping message")
-            return
-
-        att = pdf_attachments[0]
-        if "contentBytes" not in att:
-            print("❌ Attachment has no contentBytes - skipping")
-            return
-        # --- 2. Loop over attachments, decode and extract text directly ---
-        all_text = ""
-        for att in attachments:
-            if 'contentBytes' in att and att['name'].lower().endswith('.pdf'):
-                content = base64.b64decode(att['contentBytes'])
-                with pdfplumber.open(io.BytesIO(content)) as pdf:
-                    for page in pdf.pages:
-                        all_text += (page.extract_text() or "") + "\n"
-
-        # --- 3. Extract PO number (first occurrence) ---
-        po_match = re.search(r"PO-\d+", all_text)
-        po_number = po_match.group(0) if po_match else None
 
         if po_number:
             print(f"🎯 Found PO number: {po_number}")
@@ -1397,9 +1397,11 @@ def process_message(mailbox, message_id, message_date):
                     # Fill confirmation date
                     if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
                         orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = confirmation_date
+                        updated_rows += 1
                         print("   Filled confirmation date")
             if updated_rows == 0:
                 print("⚠️ No matching item codes found in this confirmation message.")
+                return
 
         # 🟢 after loop, update sheet once:
         ws = wb["მიმდინარე "]
@@ -1593,6 +1595,174 @@ def process_hach_message(mailbox, message_id, message_date):
             resp.raise_for_status()
             print(f"✅ HACH update successful ({updated} rows)")
             return
+
+def process_khrone_message(mailbox, message_id, message_date):
+    print(f"Mailbox: {mailbox}")
+    print(f"message_id: {message_id}")
+    print(f"message_date: {message_date}")
+
+    if isinstance(message_date, str):
+        dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+    elif isinstance(message_date, datetime):
+        dt = message_date
+    else:
+        print(f"⚠️ Unexpected message_date type: {type(message_date)}")
+        return
+
+    confirmation_date = dt.date()  # <-- DATE ONLY
+
+    # --- Download attachments ---
+    att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+    att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
+    if att_resp.status_code != 200:
+        print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
+        return
+
+    attachments = att_resp.json().get("value", [])
+    all_text_pages = []
+
+    for att in attachments:
+        if 'contentBytes' in att and att['name'].lower().endswith('.pdf'):
+            content = base64.b64decode(att['contentBytes'])
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text() or ""
+                    # Normalize spaces
+                    text = re.sub(r'\s+', ' ', text)
+                    all_text_pages.append(text)
+
+    # --- Extract PO number from PDF (first occurrence across all pages) ---
+    po_number = None
+    for page_text in all_text_pages:
+        po_match = re.search(r"PO-\d+", page_text)
+        if po_match:
+            po_number = po_match.group(0)
+            break
+
+    if not po_number:
+        print("❌ PO number not found in PDF, skipping processing")
+        return
+
+    print(f"🎯 Found PO number: {po_number}")
+
+    # --- Build item info dictionary (code -> week, quantity) ---
+    item_week_pattern = re.compile(r'([A-Z0-9]{10,})\s*Week\s*(\d{1,2}/\d{4})', re.IGNORECASE)
+    quantity_pattern = re.compile(r'(\d+)\s*pcs', re.IGNORECASE)
+
+    items_info = {}  # code -> {week, quantity}
+
+    for page_text in all_text_pages:
+        # normalize multiple spaces
+        page_text = re.sub(r'\s+', ' ', page_text)
+        
+        for match in item_week_pattern.finditer(page_text):
+            code = match.group(1)
+            week = match.group(2)
+            start_pos = max(match.start() - 100, 0)
+            qty_search = page_text[start_pos:match.start()]
+            qty_matches = list(quantity_pattern.finditer(qty_search))
+            quantity = int(qty_matches[-1].group(1)) if qty_matches else None
+            items_info[code] = {"week": week, "quantity": quantity}
+
+    print(items_info)
+    if not items_info:
+        print("⚠️ No item codes found in PDF")
+        return
+
+    # --- Update Excel only for rows with this PO ---
+    with EXCEL_LOCK:
+        file_stream = None
+        wb = None
+        orders_df = pd.DataFrame()
+
+        url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+        max_attempts = 6
+        for attempt in range(max_attempts):
+            try:
+                # --- Download orders file ---
+                resp = HTTP.get(url_download, headers=headers, timeout=60)
+                resp.raise_for_status()
+                file_stream = io.BytesIO(resp.content)
+                wb = load_workbook(file_stream)
+
+                if "მიმდინარე " in wb.sheetnames:
+                    ws = wb["მიმდინარე "]
+                    orders_df = pd.DataFrame(ws.values)
+                    orders_df.columns = orders_df.iloc[0]  # first row as header
+                    orders_df = orders_df[1:].reset_index(drop=True)
+                    orders_df["_excel_row"] = range(2, 2 + len(orders_df))  # Excel rows start at 2
+                else:
+                    print("⚠️ Worksheet 'მიმდინარე ' not found in orders file.")
+                    orders_df = pd.DataFrame()
+                break  # success — exit retry loop
+
+            except Exception as e:
+                wait = min(5 * (attempt + 1), 30)
+                print(f"⚠️ Error downloading main file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                time.sleep(wait)
+
+        else:
+            print("❌ Gave up downloading files after multiple attempts")
+            return
+        po_rows = orders_df[orders_df["PO"] == po_number]
+
+        if po_rows.empty:
+            print(f"⚠️ No rows in Excel match PO {po_number}")
+            return
+
+        updated_rows = 0
+        for i, row in po_rows.iterrows():  # Only rows for this PO
+            code = str(row["Code"]).strip()
+            if code in items_info:
+                info = items_info[code]
+                # Fill week
+                orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = f'{confirmation_date} (Week {info["week"]})'
+                # Fill quantity
+                if info["quantity"] is not None:
+                    orders_df.at[i, "რეალურად გამოგზავნილი რაოდენობა"] = info["quantity"]
+                updated_rows += 1
+                print(f"✅ Updated code {code}: Week={info['week']}, Quantity={info['quantity']}")
+            else:
+                print(f"⚠️ Code {code} not found in PDF for PO {po_number}")
+
+        if updated_rows == 0:
+            print("⚠️ No matching item codes were updated for this PO")
+        for i, row in orders_df.iterrows():
+            excel_row = row["_excel_row"]
+            for col_idx, col_name in enumerate(orders_df.columns, start=1):
+                if col_name == "_excel_row":
+                    continue
+                ws.cell(row=excel_row, column=col_idx).value = row[col_name]
+                if col_name == "Confirmation-ის მოსვლის თარიღი" and row[col_name]:
+                    ws.cell(row=excel_row, column=col_idx).number_format = "DD/MM/YYYY"
+
+    # Save workbook to memory
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    # Upload back
+    url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+    max_attempts = 10
+    for attempt in range(max_attempts):
+        resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+        if resp.status_code in (423, 409):  # Locked
+            wait_time = min(30, 2**attempt) + random.uniform(0, 2)
+            print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
+            continue
+
+        resp.raise_for_status()
+        range_address = get_used_range("მიმდინარე ")
+        table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
+        print(f"✅ Upload successful. Created table named {table_name}")
+        file_stream.close()
+        file_stream = wb = None
+        del orders_df
+        gc.collect()
+        return
 
 def packing_list(mailbox, message_id, message_date):
     print(f"📦 Packing List processing | mailbox={mailbox}, message_id={message_id}")
@@ -2433,7 +2603,7 @@ def webhook():
         greenlight_pattern = re.compile(
             r'^(Greenlight|Shipping) request.*?/K\d+', re.IGNORECASE
         )
-
+        khrone_oa_pattern  = re.compile(r'^O/A for order PO-\d+', re.IGNORECASE)
         for notification in notifications:
             resource = notification.get("resource", "")
             message_url = f"{GRAPH_URL}/{resource}"
@@ -2495,37 +2665,57 @@ def webhook():
                 print(f"   CC: {', '.join(cc_emails)}")
             print("-" * 60)
 
-            # --- Branch logic (INSIDE LOOP) ---
-            if po_pattern.search(subject):
-                if "@hach.com" in sender_email:
-                    print("✅ PO pattern from hach.com → process_hach_message")
+            is_khrone = "@khrone" in sender_email
+            is_hach = "@hach.com" in sender_email
+            has_po = re.search(r'PO-\d+', subject, re.IGNORECASE)
+
+            # 🚫 HARD GATE: no PO → ignore
+            if not has_po:
+                print("ℹ️ No PO in subject → ignored")
+                continue
+
+            # 1️⃣ KHRONE
+            if is_khrone and khrone_oa_pattern.match(subject):
+                print("✅ Khrone O/A → process_khrone_message")
+                POOL.submit(
+                    process_khrone_message,
+                    mailbox,
+                    message_id,
+                    message_date
+                )
+
+            # 2️⃣ HACH
+            elif is_hach:
+                if greenlight_pattern.search(subject):
+                    print("✅ Hach Greenlight → packing_list")
+                    POOL.submit(
+                        packing_list,
+                        mailbox,
+                        message_id,
+                        message_date
+                    )
+
+                elif po_pattern.search(subject):
+                    print("✅ Hach PO confirmation → process_hach_message")
                     POOL.submit(
                         process_hach_message,
                         mailbox,
                         message_id,
                         message_date
                     )
-                else:
-                    print("✅ PO pattern from other sender → process_message")
-                    POOL.submit(
-                        process_message,
-                        mailbox,
-                        message_id,
-                        message_date
-                    )
 
-            elif greenlight_pattern.search(subject):
-                print("✅ Greenlight request → packing_list")
+                else:
+                    print("ℹ️ Hach mail ignored (PO present but pattern mismatch)")
+
+            # 3️⃣ OTHER SENDERS (PO present)
+            else:
+                print("↪️ Generic PO mail → process_message")
                 POOL.submit(
-                    packing_list,
+                    process_message,
                     mailbox,
                     message_id,
                     message_date
                 )
-
-            else:
-                print("ℹ️ Message ignored (no matching pattern)")
-
         return jsonify({"status": "accepted"}), 202
 
     except Exception as e:
