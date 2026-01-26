@@ -2344,7 +2344,7 @@ def delivered_webhook():
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
     }
 
-    r = requests.HTTP(
+    r = HTTP.get(
         f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
         headers=headers,
         params={
