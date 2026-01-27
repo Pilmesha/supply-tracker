@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import string
+import traceback
+from collections import defaultdict
 load_dotenv()
 
 #======CONGIF=====
@@ -162,7 +163,7 @@ def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retr
     headers["Content-Type"] = "application/json"
     payload = {"address": range_address, "hasHeaders": has_headers}
 
-    for attempt in range(retries):
+    for _ in range(retries):
         resp = HTTP.post(url_add, headers=headers, json=payload)
         if resp.status_code in [200, 201]:
             table = resp.json()
@@ -676,8 +677,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
 
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     df = df[df['Supplier Company'] != 'HACH']
-    if df.empty:
-        raise ValueError("❌ DataFrame is empty. Nothing to append.")
     perms_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{PERMS_ID}/content"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
@@ -808,7 +807,6 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     print(f"✅ Appended {len(rows)} rows")
 
     # ------------------ color logic ------------------
-    from collections import defaultdict
 
     SUPPLIER_BASE_COLORS = {
         "KROHNE": (68,114,196), "Carl Roth": (255,0,0), "PENTAIR": (112,173,71),
@@ -956,11 +954,9 @@ def process_hach(df: pd.DataFrame) -> None:
 
             print(f"✅ HACH workflow completed. Added {len(rows)} rows.")
             POOL.submit(format_hach_sheet_full, sheet_name,start_row, len(normalized_df), table_id)
-            #format_hach_sheet_full(sheet_name=sheet_name,start_row=start_row,row_count=len(normalized_df), table_id=table_id)
 
         except Exception as e:
             print(f"❌ HACH processing failed: {e}")
-            import traceback
             traceback.print_exc()
             raise
 
@@ -968,9 +964,6 @@ def process_shipment(order_number: str, items: list) -> None:
         try:
             # --- Load sheet values ---
             data = get_sheet_values("მიმდინარე ")
-            if not data or not isinstance(data, list) or len(data) < 2:
-                print("⚠️ No data or insufficient rows in source sheet")
-                return
 
             # Ensure proper row formatting
             data = [list(row) for row in data]
@@ -988,25 +981,36 @@ def process_shipment(order_number: str, items: list) -> None:
             if matching.empty:
                 print(f"⚠️ No rows found for SO = {order_number}")
                 return
+            delivered_by_sku = defaultdict(float)
+            for item in items:
+                sku = item["sku"].strip().upper()
+                delivered_by_sku[sku] += float(item.get("quantity", 0))
             rows_to_move = []
+
             for idx, row in matching.iterrows():
-                sku = row["Code"]
+                sku = row["Code"].strip().upper()
                 qty_ordered = float(row["შეკვეთილი რაოდენობა"])
+                qty_delivered_so_far = float(row.get("მიწოდებული რაოდენობა", 0))
 
-                # Find delivered item with same SKU
-                delivered_item = next((x for x in items if x["sku"].strip().upper() == sku.strip().upper()), None)
-                if delivered_item is not None:
-                    delivered_qty = float(delivered_item["quantity"])
-                else:
-                    delivered_qty = 0.0
+                # Delivered in this package
+                newly_delivered = delivered_by_sku.get(sku, 0)
 
-                if delivered_qty == qty_ordered:
+                if newly_delivered == 0:
+                    continue
+
+                total_delivered = qty_delivered_so_far + newly_delivered
+
+                # Update delivered quantity in source DF
+                df_source.at[idx, "მიწოდებული რაოდენობა"] = total_delivered
+
+                if total_delivered >= qty_ordered:
                     rows_to_move.append(idx)
                 else:
-                    print(f"⚠️ Row not fully delivered: SO={order_number}, SKU={sku}, Ordered={qty_ordered}, Delivered={delivered_qty}")
-            if not rows_to_move:
-                print(f"⚠️ No fully delivered rows for SO {order_number}")
-                return
+                    print(
+                        f"⏳ Partial delivery: SO={order_number}, "
+                        f"SKU={sku}, Ordered={qty_ordered}, "
+                        f"Delivered={total_delivered}"
+                    )
 
             # --- Prepare DataFrame to move ---
             df_move = matching.loc[rows_to_move].copy()
@@ -1024,7 +1028,6 @@ def process_shipment(order_number: str, items: list) -> None:
 
         except Exception as e:
             print(f"❌ Fatal error: {e}")
-            import traceback
             traceback.print_exc()
 
 def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
@@ -1070,10 +1073,6 @@ def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
         df = pd.DataFrame(data[1:], columns=data[0])
         df["რეალური ჩამოსვლის თარიღი"] = (pd.to_datetime(date) - pd.Timedelta(days=2)).date()
         df['მდებარეობა'] = "ოფისი"
-        # Normalize Details column
-        if "Details" not in df.columns or "Qty Delivered" not in df.columns:
-            print("❌ Required columns not found (Details / Qty Delivered)")
-            return
 
         df["Details"] = df["Details"].astype(str).str.strip()
 
@@ -1197,16 +1196,10 @@ def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> No
             target_df = None
 
             for sheet_name in ("მიმდინარე ", "ჩამოსული"):
-                if sheet_name not in wb.sheetnames:
-                    continue
-
                 ws = wb[sheet_name]
                 df = pd.DataFrame(ws.values)
                 df.columns = df.iloc[0]
                 df = df[1:]
-
-                if "PO" not in df.columns or "Item" not in df.columns:
-                    continue
 
                 df["PO"] = df["PO"].astype(str).str.strip()
 
@@ -1488,10 +1481,6 @@ def process_hach_message(mailbox, message_id, message_date):
         main_stream   = download_excel(HACH_FILE)
 
         wb = load_workbook(main_stream)
-
-        if sheet_name not in wb.sheetnames:
-            print(f"❌ Sheet '{sheet_name}' not found")
-            return
 
         ws = wb[sheet_name]
 
@@ -1784,7 +1773,6 @@ def packing_list(mailbox, message_id, message_date):
 
         k_numbers = [k.upper() for k in k_numbers]
         print(f"📦 Found Packing Lists in subject: {k_numbers}")
-        multi_po = len(k_numbers) > 1
 
         if isinstance(message_date, str):
             dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
@@ -1873,16 +1861,9 @@ def packing_list(mailbox, message_id, message_date):
 
             print(f"🔗 PO {po_number_digits} → Packing List {po_k_number}")
 
-            if po_number_digits not in wb.sheetnames:
-                print(f"⚠️ Sheet {po_number_digits} not found, skipping")
-                continue
-
             ws = wb[po_number_digits]
 
             tables = list(ws.tables.values())
-            if not tables:
-                print(f"⚠️ No tables in sheet {po_number_digits}")
-                continue
 
             table = tables[0]
             start_cell, end_cell = table.ref.split(":")
@@ -2142,20 +2123,15 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
                 return
 
             # --- Step 3: Locate 'მიწოდების ვადა' column ---
-            header_row = None
             delivery_col_idx = None
 
             for row in target_ws.iter_rows(min_row=1, max_row=10):
                 for idx, cell in enumerate(row):
                     if str(cell.value).strip() == "მიწოდების ვადა":
-                        header_row = cell.row
                         delivery_col_idx = idx + 1
                         break
                 if delivery_col_idx:
                     break
-
-            if not delivery_col_idx:
-                raise ValueError("❌ Column 'მიწოდების ვადა' not found in HACH sheet")
 
             # --- Step 4: Write delivery date PER SKU (Code in D, Delivery in I) ---
             start_row = 9          # data starts under headers
@@ -2274,8 +2250,6 @@ def purchase_webhook():
             return "Invalid signature", 403
 
         order_id = request.json.get("data", {}).get("purchaseorders_id")
-        if not order_id:
-            return "Missing order ID", 400
         try:
             append_dataframe_to_table(get_purchase_order_df(order_id), "მიმდინარე ")
             return "OK", 200
@@ -2285,7 +2259,6 @@ def purchase_webhook():
 
     except Exception as e:
         print(f"❌ Webhook processing error: {e}")
-        import traceback
         traceback.print_exc()
         return f"Processing error: {e}", 500
 @app.route("/zoho/webhook/receive", methods=["POST"])
@@ -2298,9 +2271,6 @@ def receive_webhook():
         payload = request.json or {}
         data = payload.get("data", {})
         receive_id = data.get("purchase_receive_id")
-        if not receive_id:
-            print("❌ purchase_receive_id missing from payload")
-            return "Missing purchase_receive_id", 400
         url = f"https://www.zohoapis.com/inventory/v1/purchasereceives/{receive_id}"
         headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
@@ -2324,7 +2294,6 @@ def receive_webhook():
 
     except Exception as e:
         print(f"❌ Webhook processing error: {e}")
-        import traceback
         traceback.print_exc()
         return f"Processing error: {e}", 500
 @app.route('/zoho/webhook/delivered', methods=['POST'])
@@ -2366,15 +2335,42 @@ def delivered_webhook():
             "contentType": "application/pdf",
             "contentBytes": pdf_base64
         })
-        
-    response = HTTP.get(
-        f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
-        headers=headers,
+    packages_resp = HTTP.get(
+    "https://www.zohoapis.com/inventory/v1/packages",
+    headers=headers,
+    params={
+        "organization_id": ORG_ID,
+        "salesorder_number_contains": order_num,  # filter by SO number
+        "status": "delivered"
+    }
     )
-    response.raise_for_status()
-    receive = response.json().get("package", {})
-    # --- Extract line items ---
-    items = receive.get("line_items", [])
+    packages_resp.raise_for_status()
+    all_packages = packages_resp.json().get("packages", [])
+    matching_packages = [
+        pkg for pkg in all_packages
+        if str(pkg.get("salesorder_number", "")).strip() == str(order_num).strip()
+    ]
+    aggregated_items = defaultdict(float)
+    for pkg in matching_packages:
+        pkg_id = pkg.get("package_id")
+        
+        if not pkg_id:
+            continue
+
+        pkg_resp = HTTP.get(
+            f"https://www.zohoapis.com/inventory/v1/packages/{pkg_id}",
+            headers=headers,
+            params={"organization_id": ORG_ID}
+        )
+        pkg_resp.raise_for_status()
+
+        pkg_data = pkg_resp.json().get("package", {})
+        for item in pkg_data.get("line_items", []):
+            sku = item.get("sku", "").strip().upper()
+            qty = float(item.get("quantity", 0))
+            aggregated_items[sku] += qty
+    # Convert to list for process_shipment
+    items = [{"sku": sku, "quantity": qty} for sku, qty in aggregated_items.items()]
 
     email_future = POOL.submit(send_email, customer_name, customer_mail, attachments)
     process_future = POOL.submit(process_shipment, order_num, items)
@@ -2401,9 +2397,6 @@ def invoice_webhook():
     payload = request.get_json(force=True)
     data = payload.get("data", {})
     so_number = data.get("so_number")
-
-    if not so_number:
-        return jsonify({"error": "Missing sales order number"}), 400
 
     base_datetime = datetime.now()
 
@@ -2574,7 +2567,6 @@ def initialize_subscriptions():
     print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
     return successful_subs
 def with_app_ctx_call(fn, *args, **kwargs):
-    """Helper: call fn within app context (for background tasks)"""
     with app.app_context():
         return fn(*args, **kwargs)
 
