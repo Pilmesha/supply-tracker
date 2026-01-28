@@ -40,6 +40,7 @@ FILE_ID = os.getenv('FILE_ID')
 PERMS_ID = os.getenv('PERMS_ID')
 HACH_FILE = os.getenv('HACH_FILE')
 HACH_HS = os.getenv('HACH_HS')
+TRANS_FILE = os.getenv("TRANS_FILE")
 ACCESS_TOKEN_DRIVE = None
 ACCESS_TOKEN_EXPIRY = datetime.utcnow()
 ACCESS_TOKEN = None
@@ -711,7 +712,10 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         return
 
     items_df = pd.read_csv("zoho_items.csv")
-    trans = pd.read_csv("translations.csv")
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{TRANS_FILE}/content"
+    resp = HTTP.get(url, headers=headers, timeout=60)
+    resp.raise_for_status()
+    trans = pd.read_excel(io.BytesIO(resp.content))
     trans_lookup = {}
     for _, row in trans.iterrows():
         if pd.notna(row['Item']) and pd.notna(row['თარგმანი']):
@@ -889,7 +893,16 @@ def process_hach(df: pd.DataFrame) -> None:
                 print(f"ℹ️ Sheet '{sheet_name}' already exists — continuing.")
             else:
                 create_ws.raise_for_status()
-
+            color_payload = {
+                "tabColor": "#FFFF00"  # Yellow hex code
+            }
+            graph_safe_request(
+                            "PATCH",
+                            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}",
+                            headers,
+                            color_payload
+                        ).raise_for_status()
+            print(f"✅ Set '{sheet_name}' tab color to yellow")
             # 2. Info table (must be exactly 4x2)
             info_data = [
                 ["PO", po_number],
@@ -1133,6 +1146,23 @@ def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
                 continue
             resp.raise_for_status()
             print(f"✅ Packing List updated successfully ({updated} rows)")
+            script_payload = {
+                "script": f"""
+            function main(workbook: ExcelScript.Workbook) {{
+                let sheet = workbook.getWorksheet('{po_sheet}');
+                sheet.setTabColor('blue');
+            }}
+            """
+            }
+
+            graph_safe_request(
+                "POST",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/scripts/run",
+                headers,
+                script_payload
+            ).raise_for_status()
+
+            print(f"✅ Tab color set to blue for sheet '{po_sheet}'")
             return
 
 def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> None:
@@ -1533,32 +1563,78 @@ def process_hach_message(mailbox, message_id, message_date):
         pdf_text = ""
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page in pdf.pages:
-                pdf_text += (page.extract_text() or "") + "\n"
+                pdf_text += (page.extract_text(layout=True) or "") + "\n"
+
+        code_week_map = {}
+
+        # First, extract all week information with their context
+        week_pattern = re.compile(r'Dispatch\s+in\s+week\s*:\s*(\d{1,2}/\d{4})', re.IGNORECASE)
+        
+        # Find all occurrences of weeks and their positions
+        week_matches = list(week_pattern.finditer(pdf_text))
+        
+        if week_matches:
+            # For each code in the dataframe, search for it in the PDF
+            for idx, row in df.iterrows():
+                excel_code = str(row["Code"]).strip()
+                if not excel_code:
+                    continue
+                
+                # Search for this code in the PDF
+                code_pattern = re.compile(r'\b' + re.escape(excel_code) + r'\b')
+                code_match = code_pattern.search(pdf_text)
+                
+                if code_match:
+                    # Find the nearest week after this code
+                    code_pos = code_match.end()
+                    nearest_week = None
+                    
+                    for week_match in week_matches:
+                        week_pos = week_match.start()
+                        # Find the first week that appears after the code
+                        if week_pos > code_pos:
+                            nearest_week = week_match.group(1)
+                            break
+                    
+                    if nearest_week and excel_code not in code_week_map:
+                        code_week_map[excel_code] = nearest_week
+
+        if not code_week_map:
+            print("⚠️ No code-week pairs found in PDF")
 
         # --------------------------------------------------
-        # 6. Update rows by Code
+        # 7. Update rows by Code
         # --------------------------------------------------
         updated = 0
 
         for idx, row in df.iterrows():
-            code = row["Code"]
+            code = str(row["Code"]).strip().upper()
 
-            if not code or code not in pdf_text:
+            if not code or code not in code_week_map:
                 continue
 
-            # Confirmation date
-            week_number = confirmation_date.isocalendar().week
-            df.at[idx, "Confirmation 1 (shipment week)"] = f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
+            week_number = code_week_map[code]
+
+            df.at[idx, "Confirmation 1 (shipment week)"] = (
+                f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
+            )
 
             updated += 1
 
         if updated == 0:
             print("⚠️ No codes from PDF matched table")
-            return
 
         # --------------------------------------------------
         # 7. Write table back to sheet
         # --------------------------------------------------
+        mask_normal = df["Code"] != "CoO"
+
+        # Forward fill normally
+        df["Confirmation 1 (shipment week)"] = df["Confirmation 1 (shipment week)"].where(mask_normal).ffill()
+
+        # For rows where Code == "CoO", backward fill from the next non-NaN
+        mask_coo = df["Code"] == "CoO"
+        df.loc[mask_coo, "Confirmation 1 (shipment week)"] = df.loc[mask_coo, "Confirmation 1 (shipment week)"].bfill()
         for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
             for c_idx, value in enumerate(row, start=start_col):
                 cell = ws.cell(row=r_idx, column=c_idx)
