@@ -881,9 +881,9 @@ def process_hach(df: pd.DataFrame) -> None:
                 "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
                 "Content-Type": "application/json"
             }
-
-            # 1. Try creating worksheet
-            create_ws = graph_safe_request("POST",
+            # Add sheet
+            create_ws = graph_safe_request(
+                "POST",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
                 headers,
                 {"name": sheet_name}
@@ -893,16 +893,27 @@ def process_hach(df: pd.DataFrame) -> None:
                 print(f"ℹ️ Sheet '{sheet_name}' already exists — continuing.")
             else:
                 create_ws.raise_for_status()
-            color_payload = {
-                "tabColor": "#FFFF00"  # Yellow hex code
-            }
+
+            # Get worksheet ID
+            ws_list = graph_safe_request(
+                "GET",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets",
+                headers
+            ).json()
+
+            ws_id = next(ws["id"] for ws in ws_list["value"] if ws["name"] == sheet_name)
+
+            # Set tab color
             graph_safe_request(
-                            "PATCH",
-                            f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{sheet_name}",
-                            headers,
-                            color_payload
-                        ).raise_for_status()
+                "PATCH",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{ws_id}",
+                headers,
+                {"tabColor": "#FFFF00"}
+            ).raise_for_status()
+
             print(f"✅ Set '{sheet_name}' tab color to yellow")
+
+            
             # 2. Info table (must be exactly 4x2)
             info_data = [
                 ["PO", po_number],
