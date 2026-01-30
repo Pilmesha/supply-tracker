@@ -881,15 +881,36 @@ def process_hach(df: pd.DataFrame) -> None:
 
             print(f"\n📌 Creating HACH sheet '{sheet_name}'...")
 
-            headers = {
+            # ─────────────────────────────────────────────
+            # 1️⃣ Base headers
+            # ─────────────────────────────────────────────
+            base_headers = {
                 "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
                 "Content-Type": "application/json"
             }
-            # Add sheet
+
+            # ─────────────────────────────────────────────
+            # 2️⃣ Create workbook session (IMPORTANT)
+            # ─────────────────────────────────────────────
+            session = graph_safe_request(
+                "POST",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/createSession",
+                base_headers,
+                {"persistChanges": True}
+            ).json()
+
+            session_headers = {
+                **base_headers,
+                "workbook-session-id": session["id"]
+            }
+
+            # ─────────────────────────────────────────────
+            # 3️⃣ Add worksheet (INSIDE session)
+            # ─────────────────────────────────────────────
             create_ws = graph_safe_request(
                 "POST",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
-                headers,
+                session_headers,
                 {"name": sheet_name}
             )
 
@@ -899,7 +920,7 @@ def process_hach(df: pd.DataFrame) -> None:
                 ws_list = graph_safe_request(
                     "GET",
                     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets",
-                    headers
+                    session_headers
                 ).json()
 
                 ws = next(
@@ -910,7 +931,19 @@ def process_hach(df: pd.DataFrame) -> None:
 
             else:
                 create_ws.raise_for_status()
-                ws_id = create_ws.json()["id"]  # ⭐ USE THIS
+                ws_id = create_ws.json()["id"]
+
+            # ─────────────────────────────────────────────
+            # 4️⃣ Set tab color (THIS is the important part)
+            # ─────────────────────────────────────────────
+            graph_safe_request(
+                "PATCH",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{ws_id}",
+                session_headers,
+                {"tabColor": "Yellow"}  # named color is safest
+            ).raise_for_status()
+
+            print(f"✅ Set '{sheet_name}' tab color to yellow")
 
 
             # Set tab color
