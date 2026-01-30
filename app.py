@@ -245,7 +245,11 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     # --- Permissions ---
     letter_df = pd.read_excel(letter_stream, header=1)
     letter_stream.close()
-    trans = pd.read_csv("translations.csv")
+    # --- Translations ---
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{TRANS_FILE}/content"
+    resp = HTTP.get(url, headers=headers, timeout=60)
+    resp.raise_for_status()
+    trans = pd.read_excel(io.BytesIO(resp.content))
     trans_lookup = {}
     for _, row in trans.iterrows():
         if pd.notna(row['Item']) and pd.notna(row['თარგმანი']):
