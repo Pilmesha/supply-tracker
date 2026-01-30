@@ -907,43 +907,12 @@ def process_hach(df: pd.DataFrame) -> None:
             # ─────────────────────────────────────────────
             # 3️⃣ Add worksheet (INSIDE session)
             # ─────────────────────────────────────────────
-            create_ws = graph_safe_request(
+            graph_safe_request(
                 "POST",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/add",
                 session_headers,
                 {"name": sheet_name}
             )
-
-            if create_ws.status_code == 409:
-                print(f"ℹ️ Sheet '{sheet_name}' already exists — fetching ID.")
-
-                ws_list = graph_safe_request(
-                    "GET",
-                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets",
-                    session_headers
-                ).json()
-
-                ws = next(
-                    ws for ws in ws_list["value"]
-                    if ws["name"].strip().lower() == sheet_name.strip().lower()
-                )
-                ws_id = ws["id"]
-
-            else:
-                create_ws.raise_for_status()
-                ws_id = create_ws.json()["id"]
-
-            # ─────────────────────────────────────────────
-            # 4️⃣ Set tab color (THIS is the important part)
-            # ─────────────────────────────────────────────
-            graph_safe_request(
-                "PATCH",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{ws_id}",
-                session_headers,
-                {"tabColor": "Yellow"}  # named color is safest
-            ).raise_for_status()
-
-            print(f"✅ Set '{sheet_name}' tab color to yellow")
 
             
             # 2. Info table (must be exactly 4x2)
