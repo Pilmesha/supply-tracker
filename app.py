@@ -890,18 +890,24 @@ def process_hach(df: pd.DataFrame) -> None:
             )
 
             if create_ws.status_code == 409:
-                print(f"ℹ️ Sheet '{sheet_name}' already exists — continuing.")
+                print(f"ℹ️ Sheet '{sheet_name}' already exists — fetching ID.")
+
+                ws_list = graph_safe_request(
+                    "GET",
+                    f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets",
+                    headers
+                ).json()
+
+                ws = next(
+                    ws for ws in ws_list["value"]
+                    if ws["name"].strip().lower() == sheet_name.strip().lower()
+                )
+                ws_id = ws["id"]
+
             else:
                 create_ws.raise_for_status()
+                ws_id = create_ws.json()["id"]  # ⭐ USE THIS
 
-            # Get worksheet ID
-            ws_list = graph_safe_request(
-                "GET",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets",
-                headers
-            ).json()
-
-            ws_id = next(ws["id"] for ws in ws_list["value"] if ws["name"] == sheet_name)
 
             # Set tab color
             graph_safe_request(
