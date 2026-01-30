@@ -945,17 +945,6 @@ def process_hach(df: pd.DataFrame) -> None:
 
             print(f"✅ Set '{sheet_name}' tab color to yellow")
 
-
-            # Set tab color
-            graph_safe_request(
-                "PATCH",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/worksheets/{ws_id}",
-                headers,
-                {"tabColor": "#FFFF00"}
-            ).raise_for_status()
-
-            print(f"✅ Set '{sheet_name}' tab color to yellow")
-
             
             # 2. Info table (must be exactly 4x2)
             info_data = [
@@ -968,7 +957,7 @@ def process_hach(df: pd.DataFrame) -> None:
             graph_safe_request("PATCH",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
                 f"/workbook/worksheets/{sheet_name}/range(address='C3:D6')",
-                headers,
+                session_headers,
                 {"values": info_data}
             ).raise_for_status()
 
@@ -987,14 +976,14 @@ def process_hach(df: pd.DataFrame) -> None:
             graph_safe_request("PATCH",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
                 f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
-                headers,
+                session_headers,
                 {"values": [table_headers]}
             ).raise_for_status()
 
             # 4. Create MS Graph Table
             table_resp = graph_safe_request("POST",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/tables/add",
-                headers,
+                session_headers,
                 {"address": f"{sheet_name}!{write_range}", "hasHeaders": True}
             )
             table_resp.raise_for_status()
@@ -1012,7 +1001,7 @@ def process_hach(df: pd.DataFrame) -> None:
                 r = graph_safe_request("POST",
                     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
                     f"/workbook/tables/{table_id}/rows/add",
-                    headers,
+                    session_headers,
                     {"values": batch}
                 )
                 r.raise_for_status()
