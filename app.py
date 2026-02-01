@@ -57,7 +57,6 @@ MAILBOXES_2 = [
 ]
 WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
-PUNCT_TABLE = str.maketrans("", "", ".,;:()[]{}")
 app = Flask(__name__)
 
 
@@ -218,7 +217,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     # --- Base shaping ---
-    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer', 'Export?']].copy()
+    df = df[['Item', 'Code', 'შეკვეთილი რაოდენობა', 'Customer', 'Export?', 'მიწოდების ვადა']].copy()
     df = df.rename(columns={"Item": "Details", "შეკვეთილი რაოდენობა": "QTY"})
     df["Item"] = df.index + 1
 
@@ -590,7 +589,38 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         so_response = HTTP.get(so_detail_url, headers=headers)
                         so_response.raise_for_status()
                         so_detail = so_response.json().get("salesorder", {})
+                        delivery_cf = (
+                            so_detail
+                            .get("custom_field_hash", {})
+                            .get("cf_delivery_after_payment", "")
+                        )
+                        delivery_date_range = None  # e.g. "10/02/2026 - 20/02/2026"
+
+                        if isinstance(delivery_cf, str) and "ხელშეკრულებიდან" in delivery_cf:
+                            range_match = re.search(r"(\d+)\s*[-–]\s*(\d+)\s*ხელშეკრულებიდან", delivery_cf)
+                            single_match = re.search(r"(\d+)\s*ხელშეკრულებიდან", delivery_cf)
+                            today = datetime.today().date()
+
+                            if range_match:
+                                min_days = int(range_match.group(1))
+                                max_days = int(range_match.group(2))
+                            elif single_match:
+                                min_days = max_days = int(single_match.group(1))
+                            else:
+                                min_days = max_days = None
+                            if min_days is not None:
+                                start_date = today + timedelta(days=min_days)
+                                end_date = today + timedelta(days=max_days)
+
+                                if start_date == end_date:
+                                    delivery_date_range = start_date.strftime('%d/%m/%Y')
+                                else:
+                                    delivery_date_range = f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
+
+
+                        print(f"Debug: Delivery date = {delivery_date_range}")
                         line_items = so_detail.get("line_items", [])
+
                         
                         print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
                         
@@ -599,7 +629,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                             sku = item.get("sku")
                             item_name = item.get("name")
                             print(f"Debug: SO Item - Name: {item_name}, SKU: {sku}")
-                            
                             if sku:
                                 so_info_by_sku[sku] = {
                                     "SO": so_num,
@@ -608,16 +637,9 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     "SO_Status": so_detail.get("status"),
                                     "SO_Item_Name": item_name,
                                     "SO_Item_Quantity": item.get("quantity"),
-                                    "SO_Country": so_detail.get("country")
+                                    "SO_Country": so_detail.get("country"),
+                                    "SO_Delivery_Date_Range": delivery_date_range
                                 }
-                        # Get SO country for export logic
-                        so_country = (
-                            so_detail.get("shipping_address", {}).get("country") or 
-                            so_detail.get("billing_address", {}).get("country") or 
-                            so_detail.get("country") or 
-                            ""
-                        )
-                        print(f"Debug: SO country detected = '{so_country}'")
                         break  # Break only after processing this SO
                         
             except Exception as e:
@@ -642,7 +664,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         # Export logic for HACH
         export_value = ""
         if supplier == "HACH":
-            country_lc = so_country.lower() if so_country else ""
+            country_lc = so_info_by_sku.get(sku, {}).get("SO_Country", "").lower()
             if "azerbaijan" in country_lc or "armenia" in country_lc:
                 export_value = "კი"
             else:
@@ -661,6 +683,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                 ""
             ),
             "SO": so_number,
+            "შეკვეთის ჩაბარების ვადა" : delivery_date_range,
             "SO_Customer": so_data.get("SO_Customer", ""),
             "SO_Match": is_match,
             "Export?": export_value
@@ -675,6 +698,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     print(f"Items matched: {len(matches)}/{len(df)}")
     # Process HACH but still return DataFrame
     if supplier == "HACH":
+        df = df.rename({"შეკვეთის ჩაბარების ვადა" : "მიწოდების ვადა"}, axis=1)
         process_hach(df)
     
     # ALWAYS return the DataFrame
