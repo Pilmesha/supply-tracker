@@ -637,7 +637,10 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     "SO_Status": so_detail.get("status"),
                                     "SO_Item_Name": item_name,
                                     "SO_Item_Quantity": item.get("quantity"),
-                                    "SO_Country": so_detail.get("country"),
+                                    "SO_Country": so_detail.get("shipping_address", {}).get("country") 
+                                    or so_detail.get("billing_address", {}).get("country") 
+                                    or so_detail.get("country") 
+                                    or "",
                                     "SO_Delivery_Date_Range": delivery_date_range
                                 }
                         break  # Break only after processing this SO
