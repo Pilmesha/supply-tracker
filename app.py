@@ -1082,7 +1082,7 @@ def process_shipment(order_number: str, items: list) -> None:
             print(f"❌ Fatal error: {e}")
             traceback.print_exc()
 
-def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
+def recieved_hach(po_number: str,date:str, items: list[dict]) -> None:
     po_sheet = re.sub(r"\D", "", po_number).lstrip("00")
     print(f"📄 HACH sheet name: {po_sheet}")
     with EXCEL_LOCK:
@@ -1168,7 +1168,9 @@ def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
         if updated == 0:
             print("⚠️ No items matched Excel Details column")
             return
-
+        mask_coo = df["Code"] == "CoO"
+        df.loc[mask_coo, "მდებარეობა"] = df.loc[mask_coo, "მდებარეობა"].bfill()
+        df.loc[mask_coo, "რეალური ჩამოსვლის თარიღი"] = df.loc[mask_coo, "რეალური ჩამოსვლის თარიღი"].bfill()
         # --- Write back to Excel ---
         for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
             for c_idx, value in enumerate(row, start=start_col):
@@ -1185,26 +1187,9 @@ def update_hach_excel(po_number: str,date:str, items: list[dict]) -> None:
                 continue
             resp.raise_for_status()
             print(f"✅ Packing List updated successfully ({updated} rows)")
-            script_payload = {
-                "script": f"""
-            function main(workbook: ExcelScript.Workbook) {{
-                let sheet = workbook.getWorksheet('{po_sheet}');
-                sheet.setTabColor('blue');
-            }}
-            """
-            }
-
-            graph_safe_request(
-                "POST",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/scripts/run",
-                headers,
-                script_payload
-            ).raise_for_status()
-
-            print(f"✅ Tab color set to blue for sheet '{po_sheet}'")
             return
 
-def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> None:
+def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
     with EXCEL_LOCK:
         file_stream = None
         wb = None
@@ -1307,10 +1292,14 @@ def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> No
                         and row["PO"] == pr["po"]
                         and row["Item"] == pr["name"]
                     ):
-                        target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = pr["quantity"]
-                        pr["used"] = True
-                        updated += 1
-                        print(f"   ✔ {row['Item']} → {pr['quantity']}")
+                        current_qty = row.get("რეალურად გამოგზავნილი რაოდენობა")
+                        if current_qty in (None, ""):
+                            target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = pr["quantity"]
+                            pr["used"] = True
+                            updated += 1
+                            print(f"   ✔ {row['Item']} → {pr['quantity']}")
+                        else:
+                            print(f"   ℹ️ Skipped {row['Item']}, cell already has value {current_qty}")
                         break
 
             if updated == 0:
@@ -1325,7 +1314,9 @@ def update_nonhach_excel(po_number: str, date:str, line_items: list[dict]) -> No
 
             for row_idx, row in enumerate(target_df.values.tolist(), start=2):
                 for col_idx, value in enumerate(row, start=1):
-                    ws.cell(row=row_idx, column=col_idx).value = value
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    if cell.value in (None, ""):
+                        cell.value = value
 
             # --- Step 6: Save & upload ---
             output = io.BytesIO()
@@ -1531,7 +1522,7 @@ def process_hach_message(mailbox, message_id, message_date):
 
         subject = message.get("subject", "").strip()
 
-        po_match = re.search(r"\bPO-(\d+)\b", subject, re.IGNORECASE)
+        po_match = re.search(r"\bPO[-:#–]?\s*(\d+)\b", subject, re.IGNORECASE)
         if not po_match:
             print(f"❌ No PO number found in subject: {subject!r}")
             return
@@ -1653,10 +1644,14 @@ def process_hach_message(mailbox, message_id, message_date):
                 continue
 
             week_number = code_week_map[code]
-
-            df.at[idx, "Confirmation 1 (shipment week)"] = (
-                f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
-            )
+            current_val = row.get("Confirmation 1 (shipment week)")
+            if is_empty(current_val):
+                df.at[idx, "Confirmation 1 (shipment week)"] = (
+                    f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
+                )
+                updated += 1
+            else:
+                print(f"ℹ️ Skipped overwrite for code {code} (already has value)")
 
             updated += 1
 
@@ -1666,10 +1661,6 @@ def process_hach_message(mailbox, message_id, message_date):
         # --------------------------------------------------
         # 7. Write table back to sheet
         # --------------------------------------------------
-        mask_normal = df["Code"] != "CoO"
-
-        # Forward fill normally
-        df["Confirmation 1 (shipment week)"] = df["Confirmation 1 (shipment week)"].where(mask_normal).ffill()
 
         # For rows where Code == "CoO", backward fill from the next non-NaN
         mask_coo = df["Code"] == "CoO"
@@ -1821,8 +1812,10 @@ def process_khrone_message(mailbox, message_id, message_date):
             code = str(row["Code"]).strip()
             if code in items_info:
                 info = items_info[code]
+                current_week = orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"]
                 # Fill week
-                orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = f'{confirmation_date} (Week {info["week"]})'
+                if is_empty(current_week):
+                    orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = f'{confirmation_date} (Week {info["week"]})'
                 # Fill quantity
                 if info["quantity"] is not None:
                     orders_df.at[i, "რეალურად გამოგზავნილი რაოდენობა"] = info["quantity"]
@@ -2044,7 +2037,11 @@ def packing_list(mailbox, message_id, message_date):
                 continue
 
             total_updated += updated
-
+            mask_coo = df["Code"] == "CoO"
+            df.loc[mask_coo, "Packing List"] = df.loc[mask_coo, "Packing List"].bfill()
+            df.loc[mask_coo, "რა რიცხვში გამოგზავნეს Packing List-ი"] = df.loc[mask_coo, "რა რიცხვში გამოგზავნეს Packing List-ი"].bfill()
+            df.loc[mask_coo, "ჩამოსვლის სავარაუდო თარიღი"] = df.loc[mask_coo, "ჩამოსვლის სავარაუდო თარიღი"].bfill()
+            df.loc[mask_coo, "რამდენი გამოიგზავნა"] = df.loc[mask_coo, "რამდენი გამოიგზავნა"].bfill()
             for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
                 for c_idx, value in enumerate(row, start=start_col):
                     ws.cell(row=r_idx, column=c_idx).value = value
@@ -2070,6 +2067,182 @@ def packing_list(mailbox, message_id, message_date):
             resp.raise_for_status()
             print(f"🎉 Packing List updated successfully ({total_updated} rows)")
             return
+
+def process_khrone_packing_list(mailbox, message_id, message_date):
+    print(f"Mailbox: {mailbox}")
+    print(f"message_id: {message_id}")
+    print(f"message_date: {message_date}")
+
+    if isinstance(message_date, str):
+        dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+    elif isinstance(message_date, datetime):
+        dt = message_date
+    else:
+        print(f"⚠️ Unexpected message_date type: {type(message_date)}")
+        return
+
+    confirmation_date = dt.date()
+
+    with EXCEL_LOCK:
+        # --- Step 1: Download current orders Excel file ---
+        file_stream = None
+        wb = None
+        orders_df = pd.DataFrame()
+
+        url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+
+        max_attempts = 6
+        for attempt in range(max_attempts):
+            try:
+                resp = HTTP.get(url_download, headers=headers, timeout=60)
+                resp.raise_for_status()
+                file_stream = io.BytesIO(resp.content)
+                wb = load_workbook(file_stream)
+
+                if "მიმდინარე " in wb.sheetnames:
+                    ws = wb["მიმდინარე "]
+                    orders_df = pd.DataFrame(ws.values)
+                    orders_df.columns = orders_df.iloc[0]  # first row as header
+                    orders_df = orders_df[1:]              # drop header row
+                else:
+                    print("⚠️ Worksheet 'მიმდინარე ' not found in orders file.")
+                    orders_df = pd.DataFrame()
+                break
+            except Exception as e:
+                wait = min(5 * (attempt + 1), 30)
+                print(f"⚠️ Error downloading main file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                time.sleep(wait)
+        else:
+            print("❌ Gave up downloading orders file after multiple attempts")
+            return
+
+        # --- Step 2: Get email attachments ---
+        att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+        att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
+        if att_resp.status_code != 200:
+            print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
+            return
+
+        attachments = att_resp.json().get("value", [])
+
+        # --- Step 3: Select Khrone packing list PDF ---
+        pdf_att = None
+        for att in attachments:
+            name = att.get("name", "")
+            if name.lower().endswith(".pdf") and re.search(r"\d{3}-\d{6} Copy Packing list", name):
+                pdf_att = att
+                break
+
+        if not pdf_att or "contentBytes" not in pdf_att:
+            print("⚠️ No Khrone packing list PDF found in attachments or missing contentBytes")
+            return
+
+        pdf_bytes = base64.b64decode(pdf_att['contentBytes'])
+        all_text = ""
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                all_text += (page.extract_text() or "") + "\n"
+        # --- Step 4: Extract PO number ---
+        po_match = re.search(r"Your Order\s*:?\s*(PO-\d+)", all_text)
+        po_number = po_match.group(1) if po_match else None
+        print(po_number)
+
+        if not po_number:
+            print("⚠️ PO number not found in packing list PDF")
+            return
+
+        print(f"🎯 Found PO number: {po_number}")
+
+        pdf_lines = [line.strip() for line in all_text.splitlines() if line.strip()]
+        items = []
+
+        def parse_quantity(qty_str):
+            try:
+                return int(float(qty_str.replace(",", ".")))
+            except:
+                return None
+
+        for code in orders_df.loc[orders_df["PO"] == po_number, "Code"]:
+            found = False
+            for i, line in enumerate(pdf_lines):
+                if code in line:
+                    # Look 1–3 lines above for quantity line
+                    for j in range(1, 4):
+                        if i-j < 0:
+                            continue
+                        qty_line = pdf_lines[i-j]
+                        # Take the first number in the line as Delivered Quantity
+                        qty_match = re.search(r"(\d+,\d+)", qty_line)
+                        if qty_match:
+                            qty = parse_quantity(qty_match.group(1))
+                            if qty is not None:
+                                items.append({"Code": code, "Quantity": qty})
+                                print(f"✅ Matched code {code} with quantity {qty}")
+                                found = True
+                                break
+                    if not found:
+                        print(f"⚠️ Quantity not found for code {code} near line {i}")
+                    break
+            else:
+                print(f"⚠️ Code {code} not found in PDF")
+
+        updated_rows = 0
+        for item in items:
+            code = item["Code"]
+            qty = item["Quantity"]
+
+            # Find Excel rows for this code and PO
+            mask = (orders_df["PO"] == po_number) & (orders_df["Code"] == code)
+            if mask.any():
+                for idx in orders_df.index[mask]:
+                    # Update quantity and confirmation date
+                    orders_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = qty
+                    orders_df.at[idx, "ტვირთი მზადაა ასაღებად"] = confirmation_date
+                    updated_rows += 1
+                    print(f"✅ Updated code {code} with quantity {qty}")
+            else:
+                print(f"⚠️ Code {code} not found for PO {po_number} in Excel")
+
+        if updated_rows == 0:
+            print("⚠️ No codes matched in Excel for this packing list")
+
+        # --- Step 6: Save back to Excel and upload ---
+        ws = wb["მიმდინარე "]
+
+        # Write headers if needed
+        for col_idx, col_name in enumerate(orders_df.columns.tolist(), start=1):
+            ws.cell(row=1, column=col_idx).value = col_name
+
+        # Write data values
+        for row_idx, row in enumerate(orders_df.values.tolist(), start=2):
+            for col_idx, col_name in enumerate(orders_df.columns.tolist(), start=1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                # Only write if cell is empty
+                if cell.value in (None, ""):
+                    cell.value = row[col_idx - 1]
+                    # Format date column if needed
+                    if col_name == "ტვირთი მზადაა ასაღებად" and cell.value:
+                        cell.number_format = "DD/MM/YYYY"
+
+        # Save workbook to memory
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        # Upload back
+        url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+            if resp.status_code in (423, 409):  # Locked
+                wait_time = min(30, 2**attempt) + random.uniform(0, 2)
+                print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+            resp.raise_for_status()
+            print(f"✅ Excel updated successfully with Khrone packing list")
+            break
 
 def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_start: str, delivery_end: str) -> None:
     with EXCEL_LOCK:
@@ -2237,16 +2410,6 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
                 print(f"⚠️ SO {salesorder_number} not found in any HACH sheet (checked D4)")
                 return
 
-            # --- Step 3: Locate 'მიწოდების ვადა' column ---
-            delivery_col_idx = None
-
-            for row in target_ws.iter_rows(min_row=1, max_row=10):
-                for idx, cell in enumerate(row):
-                    if str(cell.value).strip() == "მიწოდების ვადა":
-                        delivery_col_idx = idx + 1
-                        break
-                if delivery_col_idx:
-                    break
 
             # --- Step 4: Write delivery date PER SKU (Code in D, Delivery in I) ---
             start_row = 9          # data starts under headers
@@ -2260,17 +2423,9 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
                     continue
 
                 code = str(code_cell).strip().upper()
-
-                if code in skus or code == "COO":
-                    target_ws.cell(
-                        row=row_idx,
-                        column=delivery_col_idx
-                    ).value = delivery_range
-                else:
-                    target_ws.cell(
-                        row=row_idx,
-                        column=delivery_col_idx
-                    ).value = None
+                delivery_cell = target_ws.cell(row=row_idx, column=delivery_col_idx)
+                if not delivery_cell.value and (code in skus or code == "COO"):
+                    delivery_cell.value = delivery_range
 
             # --- Step 5: Save & upload ---
             output = io.BytesIO()
@@ -2402,9 +2557,9 @@ def receive_webhook():
         vendor_name = receive.get("vendor_name", "").upper()
         if vendor_name == "HACH":
             print("🏭 HACH vendor detected")
-            POOL.submit(update_hach_excel, receive.get("purchaseorder_number"), receive.get("date"),receive.get("line_items", []))
+            POOL.submit(recieved_hach, receive.get("purchaseorder_number"), receive.get("date"),receive.get("line_items", []))
         else:
-            POOL.submit(update_nonhach_excel, receive.get("purchaseorder_number"), receive.get("date"), receive.get("line_items", []))
+            POOL.submit(recieved_nonhach, receive.get("purchaseorder_number"), receive.get("date"), receive.get("line_items", []))
         return "OK", 200
 
     except Exception as e:
@@ -2560,7 +2715,8 @@ def invoice_webhook():
         }), 200
 
     # 4️⃣ Parse weeks (single or range)
-    match = re.search(r"(\d+)(?:\s*-\s*(\d+))?\s*weeks?", delivery_cf.lower())
+    match = re.search(r"(\d+)(?:\s*-\s*(\d+))?\s*(weeks?|კვირ\w*)", delivery_cf.lower())
+
     if not match:
         return jsonify({
             "ok": True,
@@ -2705,7 +2861,9 @@ def webhook():
 
         # --- Patterns ---
         po_pattern = re.compile(
-            r'(?i)(?:purchase order\s+)?PO-\d+\b(?![^\n]*\bhas been (?:partially\s*)?received\b)'
+            r'(?i)(?:purchase order\s+|order confirmation\s+)?'
+            r'PO\s*[-:#–]?\s*\d+\b'
+            r'(?![^\n]*\bhas been (?:partially\s*)?received\b)'
         )
         greenlight_pattern = re.compile(
             r'^(Greenlight|Shipping) request.*?/K\d+', re.IGNORECASE
@@ -2771,7 +2929,15 @@ def webhook():
             if cc_emails:
                 print(f"   CC: {', '.join(cc_emails)}")
             print("-" * 60)
-
+            if "notification of readiness of goods:" in subject.lower() and "krohne.com" in sender_email:
+                print("✅ Khrone packing list → process_khrone_packing_list")
+                POOL.submit(
+                    process_khrone_packing_list,
+                    mailbox,
+                    message_id,
+                    message_date
+                )
+                continue  # skip further processing for this message
             is_khrone = "@khrone" in sender_email
             is_hach = "@hach.com" in sender_email
             has_po = re.search(r'PO-\d+', subject, re.IGNORECASE)
