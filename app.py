@@ -318,7 +318,7 @@ def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
     # Find start position of each PO in PDF
     for po in po_numbers:
         # regex to find PO with optional leading zeros
-        match = re.search(rf"PO-0*{po}\b", pdf_text)
+        match = re.search(rf"PO\s*[-:#–]?\s*0*{po}\b", pdf_text)
         if match:
             po_positions.append((po, match.start()))
         else:
@@ -382,8 +382,8 @@ def graph_safe_request(method, url, headers, json=None, max_retries=5):
 def is_empty(val):
     return val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == ""
 def extract_po_k_mapping(pdf_text: str) -> dict:
-    po_pattern = re.compile(r"PO-(\d+)")
-    k_pattern = re.compile(r"K\d+")
+    po_pattern = re.compile(r"\bPO[-:#]?\s*(\d+)\b")
+    k_pattern = re.compile(r"\bK\d{9}\b", re.IGNORECASE)
 
     po_matches = list(po_pattern.finditer(pdf_text))
     mapping = {}
@@ -1932,7 +1932,7 @@ def packing_list(mailbox, message_id, message_date):
 
         # --- Step 4: Extract ALL PO numbers ---
         po_numbers = [
-            str(int(m)) for m in re.findall(r"PO-(\d+)", pdf_text)
+            str(int(m)) for m in re.findall(r"\bPO[-:#]?\s*(\d+)\b", pdf_text)
         ]
 
         if not po_numbers:
@@ -2511,7 +2511,7 @@ def send_email(customer_name:str, customer_mail:str, attachments):
 @app.route("/")
 def index():
     return "App is running. Scheduler is active."
-@app.route("/zoho/webhook/purchase", methods=["POST"])
+@app.route("/purchase", methods=["POST"])
 def purchase_webhook():
     try:
         One_Drive_Auth()
@@ -2531,7 +2531,7 @@ def purchase_webhook():
         print(f"❌ Webhook processing error: {e}")
         traceback.print_exc()
         return f"Processing error: {e}", 500
-@app.route("/zoho/webhook/receive", methods=["POST"])
+@app.route("/receive", methods=["POST"])
 def receive_webhook():
     try:
         One_Drive_Auth()
@@ -2566,7 +2566,7 @@ def receive_webhook():
         print(f"❌ Webhook processing error: {e}")
         traceback.print_exc()
         return f"Processing error: {e}", 500
-@app.route('/zoho/webhook/delivered', methods=['POST'])
+@app.route('/delivered', methods=['POST'])
 def delivered_webhook():
     One_Drive_Auth()
     if not verify_zoho_signature(request, "shipmentorders"):
@@ -2656,7 +2656,7 @@ def delivered_webhook():
         if process_future.exception():
             print(f"Process shipment failed: {process_future.exception()}")
         return f"Processing error: {e}", 500
-@app.route("/zoho/webhook/invoice", methods=["POST"])
+@app.route("/invoice", methods=["POST"])
 def invoice_webhook():
     One_Drive_Auth()
 
