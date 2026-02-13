@@ -13,6 +13,7 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
+COPY --chown=appuser:appuser . .
 # Switch to non-root user
 USER appuser
 

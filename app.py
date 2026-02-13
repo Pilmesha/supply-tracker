@@ -451,6 +451,8 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
     last_row = start_row + row_count
     info_range  = "C3:D6"
     data_range  = f"B{start_row + 1}:T{last_row}"
+    header_range = f"B{start_row}:T{start_row}"
+
 
     base_url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
@@ -479,6 +481,20 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
             headers,
             {"style": "Continuous", "weight": "Thin", "color": "#000000"}
         ).raise_for_status()
+    # -------------------------------------------------
+    # HEADER FORMAT
+    # -------------------------------------------------
+    graph_safe_request(
+        "PATCH",
+        f"{base_url}/worksheets/{sheet_name}"
+        f"/range(address='{header_range}')/format",
+        headers,
+        {
+            "horizontalAlignment": "Center",
+            "verticalAlignment": "Center",
+            "wrapText": True
+        }
+    ).raise_for_status()
 
     # -------------------------------------------------
     # 2. Format ALL data cells at once
@@ -988,17 +1004,6 @@ def process_hach(df: pd.DataFrame) -> None:
                 session_headers,
                 {"values": [table_headers]}
             ).raise_for_status()
-            # graph_safe_request(
-            #     "PATCH",
-            #     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-            #     f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')/format/alignment",
-            #     session_headers,
-            #     {
-            #         "horizontal": "Center",
-            #         "vertical": "Center",
-            #         "wrapText": True
-            #     }
-            # ).raise_for_status()
 
             # 4. Create MS Graph Table
             table_resp = graph_safe_request("POST",
