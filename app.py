@@ -988,17 +988,17 @@ def process_hach(df: pd.DataFrame) -> None:
                 session_headers,
                 {"values": [table_headers]}
             ).raise_for_status()
-            graph_safe_request(
-                "PATCH",
-                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
-                f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')/format/alignment",
-                session_headers,
-                {
-                    "horizontal": "Center",
-                    "vertical": "Center",
-                    "wrapText": True
-                }
-            ).raise_for_status()
+            # graph_safe_request(
+            #     "PATCH",
+            #     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+            #     f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')/format/alignment",
+            #     session_headers,
+            #     {
+            #         "horizontal": "Center",
+            #         "vertical": "Center",
+            #         "wrapText": True
+            #     }
+            # ).raise_for_status()
 
             # 4. Create MS Graph Table
             table_resp = graph_safe_request("POST",
