@@ -463,7 +463,7 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
         f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format",
         headers,
-        {"verticalAlignment": "Center", "horizontalAlignment": "Left"}
+        {"verticalAlignment": "Center", "horizontalAlignment": "Center"}
     ).raise_for_status()
 
     # Borders
@@ -987,6 +987,17 @@ def process_hach(df: pd.DataFrame) -> None:
                 f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')",
                 session_headers,
                 {"values": [table_headers]}
+            ).raise_for_status()
+            graph_safe_request(
+                "PATCH",
+                f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
+                f"/workbook/worksheets/{sheet_name}/range(address='{write_range}')/format/alignment",
+                session_headers,
+                {
+                    "horizontal": "Center",
+                    "vertical": "Center",
+                    "wrapText": True
+                }
             ).raise_for_status()
 
             # 4. Create MS Graph Table
