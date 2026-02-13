@@ -2855,7 +2855,7 @@ def webhook():
     if request.method != "POST":
         return jsonify({"status": "active"}), 200
 
-        try:
+    try:
         data = request.json or {}
         notifications = data.get("value", [])
 
