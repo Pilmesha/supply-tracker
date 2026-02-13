@@ -495,6 +495,14 @@ def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_i
             "wrapText": True
         }
     ).raise_for_status()
+    graph_safe_request(
+    "PATCH",
+    f"{base_url}/worksheets/{sheet_name}"
+    f"/range(address='{sheet_name}!{start_row}:{start_row}')/format",
+    headers,
+    {"rowHeight": 20}
+    ).raise_for_status()
+
 
     # -------------------------------------------------
     # 2. Format ALL data cells at once
