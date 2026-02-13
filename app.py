@@ -2130,7 +2130,7 @@ def process_khrone_packing_list(mailbox, message_id, message_date):
         pdf_att = None
         for att in attachments:
             name = att.get("name", "")
-            if name.lower().endswith(".pdf") and re.search(r"\d{3}-\d{6} Copy Packing list", name):
+            if name.lower().endswith(".pdf") and re.search(r"(?i)\d{3}-\d{6} (?:Copy )?Packing list", name):
                 pdf_att = att
                 break
 
