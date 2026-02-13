@@ -9,6 +9,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import traceback
 from collections import defaultdict
+import sqlite3
 load_dotenv()
 
 #======CONGIF=====
@@ -57,6 +58,18 @@ MAILBOXES_2 = [
 ]
 WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
+
+conn = sqlite3.connect("processed.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS processed_messages (
+    internet_id TEXT PRIMARY KEY
+)
+""")
+conn.commit()
+
+
 app = Flask(__name__)
 
 
@@ -2878,7 +2891,7 @@ def webhook():
 
         for notification in notifications:
             resource = notification.get("resource", "")
-            message_url = f"{GRAPH_URL}/{resource}"
+            message_url = f"{GRAPH_URL}/{resource}?$select=internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime"
 
             message_response = safe_request(
                 "get",
@@ -2895,6 +2908,21 @@ def webhook():
                 continue
 
             message = message_response.json()
+            internet_id = message.get("internetMessageId")
+            if not internet_id:
+                continue
+
+            try:
+                cursor.execute(
+                    "INSERT INTO processed_messages VALUES (?)",
+                    (internet_id,)
+                )
+                conn.commit()
+
+            except sqlite3.IntegrityError:
+                print("⚠️ Duplicate email skipped")
+                continue
+
 
             # --- Message fields ---
             subject = message.get("subject", "").strip()
