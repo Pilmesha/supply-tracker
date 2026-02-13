@@ -2865,10 +2865,17 @@ def webhook():
             r'PO\s*[-:#–]?\s*\d+\b'
             r'(?![^\n]*\bhas been (?:partially\s*)?received\b)'
         )
+
         greenlight_pattern = re.compile(
-            r'^(Greenlight|Shipping) request.*?/K\d+', re.IGNORECASE
+            r'(Greenlight|Shipping)\s+request.*?/\s*K\d{6,}',
+            re.IGNORECASE
         )
-        khrone_oa_pattern  = re.compile(r'^O/A for order PO-\d+', re.IGNORECASE)
+
+        khrone_oa_pattern = re.compile(
+            r'O/A\s+for\s+order\s+PO-\d+',
+            re.IGNORECASE
+        )
+
         for notification in notifications:
             resource = notification.get("resource", "")
             message_url = f"{GRAPH_URL}/{resource}"
@@ -2890,7 +2897,7 @@ def webhook():
             message = message_response.json()
 
             # --- Message fields ---
-            subject = message.get("subject", "")
+            subject = message.get("subject", "").strip()
 
             sender_email = (
                 message.get("from", {})
@@ -2898,6 +2905,12 @@ def webhook():
                 .get("address", "")
                 .lower()
             )
+
+            message_id = message.get("id")
+            message_date = message.get("receivedDateTime")
+
+            if not message_id:
+                continue
 
             to_emails = [
                 r.get("emailAddress", {}).get("address", "")
@@ -2908,9 +2921,6 @@ def webhook():
                 r.get("emailAddress", {}).get("address", "")
                 for r in message.get("ccRecipients", [])
             ]
-
-            message_id = message.get("id")
-            message_date = message.get("receivedDateTime")
 
             # --- Parse mailbox from resource ---
             mailbox = "unknown"
@@ -2929,7 +2939,13 @@ def webhook():
             if cc_emails:
                 print(f"   CC: {', '.join(cc_emails)}")
             print("-" * 60)
-            if "notification of readiness of goods:" in subject.lower() and "krohne.com" in sender_email:
+
+            is_khrone = sender_email.endswith("@krohne.com")
+            is_hach = sender_email.endswith("@hach.com")
+            has_po_generic = re.search(r'PO-\d+', subject, re.IGNORECASE)
+
+            # 1️⃣ KHRONE readiness (single check)
+            if is_khrone and "notification of readiness of goods:" in subject.lower():
                 print("✅ Khrone packing list → process_khrone_packing_list")
                 POOL.submit(
                     process_khrone_packing_list,
@@ -2937,43 +2953,57 @@ def webhook():
                     message_id,
                     message_date
                 )
-                continue  # skip further processing for this message
-            is_khrone = "@khrone" in sender_email
-            is_hach = "@hach.com" in sender_email
-            has_po_generic = re.search(r'PO-\d+', subject, re.IGNORECASE)
-
-            # 1️⃣ KHRONE readiness
-            if is_khrone and "notification of readiness of goods:" in subject.lower():
-                print("✅ Khrone packing list → process_khrone_packing_list")
-                POOL.submit(process_khrone_packing_list, mailbox, message_id, message_date)
 
             # 2️⃣ KHRONE O/A
-            elif is_khrone and khrone_oa_pattern.match(subject):
+            elif is_khrone and khrone_oa_pattern.search(subject):
                 print("✅ Khrone O/A → process_khrone_message")
-                POOL.submit(process_khrone_message, mailbox, message_id, message_date)
+                POOL.submit(
+                    process_khrone_message,
+                    mailbox,
+                    message_id,
+                    message_date
+                )
 
             # 3️⃣ HACH
-            elif is_hach:
+            elif is_hach and subject:
                 is_greenlight = greenlight_pattern.search(subject)
                 has_po_hach = po_pattern.search(subject)
 
                 if is_greenlight:
                     print("✅ Hach Greenlight → packing_list")
-                    POOL.submit(packing_list, mailbox, message_id, message_date)
+                    POOL.submit(
+                        packing_list,
+                        mailbox,
+                        message_id,
+                        message_date
+                    )
+
                 elif has_po_hach:
                     print("✅ Hach PO confirmation → process_hach_message")
-                    POOL.submit(process_hach_message, mailbox, message_id, message_date)
+                    POOL.submit(
+                        process_hach_message,
+                        mailbox,
+                        message_id,
+                        message_date
+                    )
+
                 else:
                     print("ℹ️ Hach mail ignored (no PO or Greenlight)")
 
             # 4️⃣ Generic PO
             elif has_po_generic:
                 print("↪️ Generic PO mail → process_message")
-                POOL.submit(process_message, mailbox, message_id, message_date)
+                POOL.submit(
+                    process_message,
+                    mailbox,
+                    message_id,
+                    message_date
+                )
 
             # 5️⃣ Ignore everything else
             else:
                 print("ℹ️ Mail ignored (no PO or relevant pattern)")
+
         return jsonify({"status": "accepted"}), 202
 
     except Exception as e:
