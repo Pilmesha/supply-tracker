@@ -232,7 +232,7 @@ The system prioritizes operational resilience:
 * File-lock scenarios trigger exponential backoff retries (up to 30 seconds).
 * Parallel execution prevents independent workflows from blocking each other.
 * Reusable HTTP sessions reduce latency and connection overhead.
-
+* SQLite database for storing already processed emails to prevent processing the same email multiple times when it is sent to several tracked recipients.
 ---
 
 ## Security

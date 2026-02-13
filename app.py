@@ -58,8 +58,8 @@ MAILBOXES_2 = [
 ]
 WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
-
-conn = sqlite3.connect("processed.db", check_same_thread=False)
+DB_PATH = os.environ.get("SQLITE_DB_PATH", "/tmp/processed.db")
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
