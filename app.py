@@ -983,7 +983,7 @@ def process_hach(df: pd.DataFrame) -> None:
             info_data = [
                 ["PO", po_number],
                 ["SO", df["Reference"].iloc[0] if "Reference" in df else ""],
-                ["POს გაკეთების თარიღი", df["შეკვეთის გაკეთების თარიღი"].iloc[0]],
+                ["POს გაკეთების თარიღი",pd.to_datetime(df["შეკვეთის გაკეთების თარიღი"].iloc[0]).strftime("%d/%m/%Y")],
                 ["დღვანდელი თარიღი", pd.Timestamp.now().strftime("%d/%m/%Y")]
             ]
 
@@ -2766,8 +2766,8 @@ def invoice_webhook():
     start_date = base_datetime + timedelta(weeks=start_w)
     end_date = base_datetime + timedelta(weeks=end_w)
 
-    start_str = start_date.strftime("%d/%m/%y")
-    end_str = end_date.strftime("%d/%m/%y")
+    start_str = start_date.strftime("%d/%m/%Y")
+    end_str = end_date.strftime("%d/%m/%Y")
 
     # 5️⃣ Split items by HACH / NON-HACH (EXCEL-BASED)
     hach_skus = []
