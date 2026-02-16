@@ -1386,7 +1386,14 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
                 file_stream.close()
             gc.collect()
 
-def process_message(mailbox, message_id, message_date):
+def process_message(mailbox, message_id, message_date, internet_id):
+    cursor.execute(
+        "SELECT 1 FROM processed_messages WHERE id = ?",
+        (internet_id,)
+    )
+    if cursor.fetchone():
+        print("⚠️ Duplicate email skipped")
+        return
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
     print(f"message_date: {message_date}")
@@ -1533,8 +1540,20 @@ def process_message(mailbox, message_id, message_date):
             del orders_df
             gc.collect()
             return
+    cursor.execute(
+        "INSERT INTO processed_messages VALUES (?)",
+        (internet_id,)
+    )
+    conn.commit()
 
-def process_hach_message(mailbox, message_id, message_date):
+def process_hach_message(mailbox, message_id, message_date, internet_id):
+    cursor.execute(
+        "SELECT 1 FROM processed_messages WHERE id = ?",
+        (internet_id,)
+    )
+    if cursor.fetchone():
+        print("⚠️ Duplicate email skipped")
+        return
     print(f"📦 HACH processing | mailbox={mailbox}, message_id={message_id}")
     if isinstance(message_date, str):
         dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
@@ -1727,8 +1746,20 @@ def process_hach_message(mailbox, message_id, message_date):
             resp.raise_for_status()
             print(f"✅ HACH update successful ({updated} rows)")
             return
+    cursor.execute(
+        "INSERT INTO processed_messages VALUES (?)",
+        (internet_id,)
+    )
+    conn.commit()
 
-def process_khrone_message(mailbox, message_id, message_date):
+def process_khrone_message(mailbox, message_id, message_date, internet_id):
+    cursor.execute(
+        "SELECT 1 FROM processed_messages WHERE id = ?",
+        (internet_id,)
+    )
+    if cursor.fetchone():
+        print("⚠️ Duplicate email skipped")
+        return
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
     print(f"message_date: {message_date}")
@@ -1897,8 +1928,20 @@ def process_khrone_message(mailbox, message_id, message_date):
         del orders_df
         gc.collect()
         return
+    cursor.execute(
+        "INSERT INTO processed_messages VALUES (?)",
+        (internet_id,)
+    )
+    conn.commit()
 
-def packing_list(mailbox, message_id, message_date):
+def packing_list(mailbox, message_id, message_date, internet_id):
+    cursor.execute(
+        "SELECT 1 FROM processed_messages WHERE id = ?",
+        (internet_id,)
+    )
+    if cursor.fetchone():
+        print("⚠️ Duplicate email skipped")
+        return
     print(f"📦 Packing List processing | mailbox={mailbox}, message_id={message_id}")
 
     with EXCEL_LOCK:
@@ -2104,8 +2147,20 @@ def packing_list(mailbox, message_id, message_date):
             resp.raise_for_status()
             print(f"🎉 Packing List updated successfully ({total_updated} rows)")
             return
+    cursor.execute(
+        "INSERT INTO processed_messages VALUES (?)",
+        (internet_id,)
+    )
+    conn.commit()
 
-def process_khrone_packing_list(mailbox, message_id, message_date):
+def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
+    cursor.execute(
+        "SELECT 1 FROM processed_messages WHERE id = ?",
+        (internet_id,)
+    )
+    if cursor.fetchone():
+        print("⚠️ Duplicate email skipped")
+        return
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
     print(f"message_date: {message_date}")
@@ -2280,6 +2335,11 @@ def process_khrone_packing_list(mailbox, message_id, message_date):
             resp.raise_for_status()
             print(f"✅ Excel updated successfully with Khrone packing list")
             break
+    cursor.execute(
+        "INSERT INTO processed_messages VALUES (?)",
+        (internet_id,)
+    )
+    conn.commit()
 
 def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_start: str, delivery_end: str) -> None:
     with EXCEL_LOCK:
@@ -3003,7 +3063,8 @@ def webhook():
                     process_khrone_packing_list,
                     mailbox,
                     message_id,
-                    message_date
+                    message_date,
+                    internet_id
                 )
 
             # 2️⃣ KHRONE O/A
@@ -3013,7 +3074,8 @@ def webhook():
                     process_khrone_message,
                     mailbox,
                     message_id,
-                    message_date
+                    message_date,
+                    internet_id
                 )
 
             # 3️⃣ HACH
@@ -3027,7 +3089,8 @@ def webhook():
                         packing_list,
                         mailbox,
                         message_id,
-                        message_date
+                        message_date,
+                        internet_id
                     )
 
                 elif has_po_hach:
@@ -3036,7 +3099,8 @@ def webhook():
                         process_hach_message,
                         mailbox,
                         message_id,
-                        message_date
+                        message_date,
+                        internet_id
                     )
 
                 else:
@@ -3049,7 +3113,8 @@ def webhook():
                     process_message,
                     mailbox,
                     message_id,
-                    message_date
+                    message_date,
+                    internet_id
                 )
 
             # 5️⃣ Ignore everything else
