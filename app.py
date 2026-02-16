@@ -1387,12 +1387,18 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
             gc.collect()
 
 def process_message(mailbox, message_id, message_date, internet_id):
-    cursor.execute(
-        "SELECT 1 FROM processed_messages WHERE id = ?",
-        (internet_id,)
-    )
-    if cursor.fetchone():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "INSERT INTO processed_messages (internet_id) VALUES (?)",
+            (internet_id,)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
         print("⚠️ Duplicate email skipped")
+        conn.close()
         return
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
@@ -1540,19 +1546,21 @@ def process_message(mailbox, message_id, message_date, internet_id):
             del orders_df
             gc.collect()
             return
-    cursor.execute(
-        "INSERT INTO processed_messages VALUES (?)",
-        (internet_id,)
-    )
-    conn.commit()
+    conn.close()
 
 def process_hach_message(mailbox, message_id, message_date, internet_id):
-    cursor.execute(
-        "SELECT 1 FROM processed_messages WHERE id = ?",
-        (internet_id,)
-    )
-    if cursor.fetchone():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "INSERT INTO processed_messages (internet_id) VALUES (?)",
+            (internet_id,)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
         print("⚠️ Duplicate email skipped")
+        conn.close()
         return
     print(f"📦 HACH processing | mailbox={mailbox}, message_id={message_id}")
     if isinstance(message_date, str):
@@ -1746,19 +1754,20 @@ def process_hach_message(mailbox, message_id, message_date, internet_id):
             resp.raise_for_status()
             print(f"✅ HACH update successful ({updated} rows)")
             return
-    cursor.execute(
-        "INSERT INTO processed_messages VALUES (?)",
-        (internet_id,)
-    )
-    conn.commit()
+    conn.close()
 
 def process_khrone_message(mailbox, message_id, message_date, internet_id):
-    cursor.execute(
-        "SELECT 1 FROM processed_messages WHERE id = ?",
-        (internet_id,)
-    )
-    if cursor.fetchone():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+            cursor.execute(
+                "INSERT INTO processed_messages (internet_id) VALUES (?)",
+                (internet_id,)
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
         print("⚠️ Duplicate email skipped")
+        conn.close()
         return
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
@@ -1928,19 +1937,21 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
         del orders_df
         gc.collect()
         return
-    cursor.execute(
-        "INSERT INTO processed_messages VALUES (?)",
-        (internet_id,)
-    )
-    conn.commit()
+    conn.close()
 
 def packing_list(mailbox, message_id, message_date, internet_id):
-    cursor.execute(
-        "SELECT 1 FROM processed_messages WHERE id = ?",
-        (internet_id,)
-    )
-    if cursor.fetchone():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "INSERT INTO processed_messages (internet_id) VALUES (?)",
+            (internet_id,)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
         print("⚠️ Duplicate email skipped")
+        conn.close()
         return
     print(f"📦 Packing List processing | mailbox={mailbox}, message_id={message_id}")
 
@@ -2147,19 +2158,21 @@ def packing_list(mailbox, message_id, message_date, internet_id):
             resp.raise_for_status()
             print(f"🎉 Packing List updated successfully ({total_updated} rows)")
             return
-    cursor.execute(
-        "INSERT INTO processed_messages VALUES (?)",
-        (internet_id,)
-    )
-    conn.commit()
+    conn.close()
 
 def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
-    cursor.execute(
-        "SELECT 1 FROM processed_messages WHERE id = ?",
-        (internet_id,)
-    )
-    if cursor.fetchone():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "INSERT INTO processed_messages (internet_id) VALUES (?)",
+            (internet_id,)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
         print("⚠️ Duplicate email skipped")
+        conn.close()
         return
     print(f"Mailbox: {mailbox}")
     print(f"message_id: {message_id}")
@@ -2339,7 +2352,7 @@ def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
         "INSERT INTO processed_messages VALUES (?)",
         (internet_id,)
     )
-    conn.commit()
+    conn.close()
 
 def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_start: str, delivery_end: str) -> None:
     with EXCEL_LOCK:
