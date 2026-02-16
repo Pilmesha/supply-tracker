@@ -2993,20 +2993,6 @@ def webhook():
 
             message = message_response.json()
             internet_id = message.get("internetMessageId")
-            if not internet_id:
-                continue
-
-            try:
-                cursor.execute(
-                    "INSERT INTO processed_messages VALUES (?)",
-                    (internet_id,)
-                )
-                conn.commit()
-
-            except sqlite3.IntegrityError:
-                print("⚠️ Duplicate email skipped")
-                continue
-
 
             # --- Message fields ---
             subject = message.get("subject", "").strip()
