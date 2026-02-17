@@ -74,8 +74,9 @@ app = Flask(__name__)
 
 
 # ======= AUTH ===========
-def refresh_access_token()-> str:
+def refresh_access_token() -> str:
     global ACCESS_TOKEN
+
     url = "https://accounts.zoho.com/oauth/v2/token"
     params = {
         "refresh_token": REFRESH_TOKEN,
@@ -83,8 +84,16 @@ def refresh_access_token()-> str:
         "client_secret": CLIENT_SECRET,
         "grant_type": "refresh_token"
     }
-    resp = HTTP.post(url, params=params).json()
-    ACCESS_TOKEN = resp["access_token"]
+
+    resp = HTTP.post(url, params=params)
+    resp.raise_for_status()
+
+    data = resp.json()
+
+    if "access_token" not in data:
+        raise Exception(f"Zoho token refresh failed: {data}")
+
+    ACCESS_TOKEN = data["access_token"]
     return ACCESS_TOKEN
 def verify_zoho_signature(request, expected_module):
     # Select secret based on webhook type
@@ -2511,7 +2520,17 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
             for sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]
                 cell_value = ws["D4"].value
-                if cell_value and str(cell_value).strip() == salesorder_number:
+
+                if not cell_value:
+                    continue
+
+                # Normalize text
+                text = str(cell_value).upper()
+
+                # Extract all SO numbers like SO-12345
+                found_sos = re.findall(r"SO[-]?\d+", text)
+
+                if salesorder_number.upper() in found_sos:
                     target_ws = ws
                     print(f"📄 HACH sheet matched: '{sheet_name}' (SO found in D4)")
                     break
