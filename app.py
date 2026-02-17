@@ -580,6 +580,47 @@ def load_hach_reference_values() -> set[str]:
 
     wb.close()
     return hach_values
+def get_first_payment_date(invoice_id):
+    headers = {"Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"}
+    try:
+        # Get payments using the internal invoice ID
+        payments_url = f"https://www.zohoapis.com/inventory/v1/invoices/{invoice_id}/payments"
+        payments_params = {"organization_id": ORG_ID}
+        
+        print(f"💰 Fetching payments for invoice {invoice_id}")
+        payments_resp = HTTP.get(payments_url, headers=headers, params=payments_params)
+        payments_resp.raise_for_status()
+        
+        payments_data = payments_resp.json()
+        payments = payments_data.get("payments", [])
+        
+        if not payments:
+            print(f"ℹ️ No payments found for invoice {invoice_id}")
+            return None
+        
+        # Find the earliest payment date
+        valid_payments = [p for p in payments if p.get("date")]
+        
+        if not valid_payments:
+            print(f"ℹ️ No valid payment dates found for invoice {invoice_id}")
+            return None
+        
+        # Sort by date and get the earliest
+        earliest_payment = min(valid_payments, key=lambda p: p["date"])
+        earliest_date = earliest_payment["date"]
+        
+        print(f"✅ Earliest payment date: {earliest_date}")
+        return earliest_date
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            print(f"❌ Invoice {invoice_id} not found")
+        else:
+            print(f"❌ HTTP error for invoice {invoice_id}: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Failed to get payment date for {invoice_id}: {e}")
+        return None
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
@@ -604,7 +645,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Find SO numbers in reference (but proceed even if none found)
     so_numbers = re.findall(r"(?i)SO-\d+", reference) if reference else []
     so_info_by_sku = {}
-    so_country = ""
     
     print(f"\nDebug: Reference = '{reference}'")
     print(f"Debug: Found SO numbers = {so_numbers}")
@@ -629,7 +669,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                     if so.get("salesorder_number", "").upper() == so_num:
                         print(f"Debug: Found exact match for {so_num}")
                         salesorder_id = so.get("salesorder_id")
-                        
                         # Now get the full sales order with line items
                         so_detail_url = f"https://www.zohoapis.com/inventory/v1/salesorders/{salesorder_id}"
                         so_response = HTTP.get(so_detail_url, headers=headers)
@@ -662,6 +701,37 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     delivery_date_range = start_date.strftime('%d/%m/%Y')
                                 else:
                                     delivery_date_range = f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
+                        else:
+                            try:
+                                invoices_response = HTTP.get(
+                                    "https://www.zohoapis.com/inventory/v1/invoices",
+                                    headers=headers,
+                                    params={"salesorder_id": salesorder_id}
+                                )
+                                invoices_response.raise_for_status()
+                                invoices = invoices_response.json().get("invoices", [])
+
+                                print(f"Debug: Found {len(invoices)} invoices for SO {so_num}")
+
+                                # Find the first paid/partially_paid invoice for this SO
+                                target_invoice = None
+                                for inv in invoices:
+                                    status = inv.get("status", "").lower()
+                                    if status in ["paid", "partially_paid"]:
+                                        target_invoice = inv
+                                        break
+                                
+                                # Process only the target invoice if found
+                                if target_invoice:
+                                    invoice_id = target_invoice.get('invoice_id')
+                                    
+                                    # Get first payment date using invoice ID (more efficient)
+                                    first_payment_date = get_first_payment_date(invoice_id)
+                                else:
+                                    print(f"Debug: No paid/partially_paid invoices found for SO {so_num}")
+
+                            except Exception as e:
+                                print(f"Debug: Error fetching invoices for SO {so_num}: {e}")
 
 
                         print(f"Debug: Delivery date = {delivery_date_range}")
@@ -745,7 +815,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     matches = df[df['SO_Match'] == 'Yes']
     print(f"SOs in reference: {', '.join(so_numbers) if so_numbers else 'None'}")
     print(f"Items matched: {len(matches)}/{len(df)}")
-    # Process HACH but still return DataFrame
+    # # Process HACH but still return DataFrame
     if supplier == "HACH":
         df = df.rename({"შეკვეთის ჩაბარების ვადა" : "მიწოდების ვადა"}, axis=1)
         process_hach(df)
