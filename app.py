@@ -724,11 +724,37 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                 # Process only the target invoice if found
                                 if target_invoice:
                                     invoice_id = target_invoice.get('invoice_id')
-                                    
-                                    # Get first payment date using invoice ID (more efficient)
-                                    first_payment_date = get_first_payment_date(invoice_id)
-                                else:
-                                    print(f"Debug: No paid/partially_paid invoices found for SO {so_num}")
+                                    raw_payment_date = get_first_payment_date(invoice_id)
+                                    if raw_payment_date:
+                                        try:
+                                            first_payment_date = datetime.strptime(raw_payment_date, "%d-%m-%Y").date()
+                                        except ValueError:
+                                            print(f"Debug: Unexpected payment date format: {raw_payment_date}")
+                                            first_payment_date = None
+                                    else:
+                                        first_payment_date = None
+                                    if first_payment_date:
+                                        match = re.search(r"(\d+)(?:\s*-\s*(\d+))?\s*(weeks?|კვირ\w*)", delivery_cf.lower())
+
+                                        if match:
+                                            start_w = int(match.group(1))
+                                            end_w = int(match.group(2)) if match.group(2) else start_w
+
+                                            start_date = first_payment_date + timedelta(weeks=start_w)
+                                            end_date = first_payment_date + timedelta(weeks=end_w)
+
+                                            start_str = start_date.strftime("%d/%m/%Y")
+                                            end_str = end_date.strftime("%d/%m/%Y")
+
+                                            delivery_date_range = (
+                                                start_str
+                                                if start_str == end_str
+                                                else f"{start_str} - {end_str}"
+                                            )
+                                        else:
+                                            print(f"Debug: Delivery lead time format not recognized for SO {so_num}")
+                                    else:
+                                        print(f"Debug: Could not calculate delivery from payment for SO {so_num}")
 
                             except Exception as e:
                                 print(f"Debug: Error fetching invoices for SO {so_num}: {e}")
@@ -802,7 +828,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                 ""
             ),
             "SO": so_number,
-            "შეკვეთის ჩაბარების ვადა" : delivery_date_range,
+            "შეკვეთის ჩაბარების ვადა" : so_data.get("SO_Delivery_Date_Range", ""),
             "SO_Customer": so_data.get("SO_Customer", ""),
             "SO_Match": is_match,
             "Export?": export_value
