@@ -1011,6 +1011,28 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
             f"/range(address='{rng}')/format/fill"
         )
         HTTP.patch(fill_url, headers=hdrs, json={"color": f"#{r:02X}{g:02X}{b:02X}"})
+    # ------------------ Apply Borders to All Appended Cells ------------------
+    end_row = start_row + len(rows) - 1
+    full_range = f"{first_col}{start_row}:{last_col}{end_row}"
+    borders_url = (
+        f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
+        f"/items/{FILE_ID}/workbook/worksheets/{sheet_name}"
+        f"/range(address='{full_range}')/format/borders"
+    )
+
+    border_payload = {
+        "style": "Continuous",
+        "weight": "Thin",
+        "color": "#000000"
+    }
+
+    # Apply border to all edge types
+    for border_type in ["EdgeTop","EdgeBottom","EdgeLeft","EdgeRight","InsideHorizontal","InsideVertical"]:
+        HTTP.patch(
+            f"{borders_url}/{border_type}",
+            headers=hdrs,
+            json=border_payload
+        )
 
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
