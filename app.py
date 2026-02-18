@@ -586,24 +586,14 @@ def get_first_payment_date(invoice_id):
         # Get payments using the internal invoice ID
         payments_url = f"https://www.zohoapis.com/inventory/v1/invoices/{invoice_id}/payments"
         payments_params = {"organization_id": ORG_ID}
-        
-        print(f"💰 Fetching payments for invoice {invoice_id}")
         payments_resp = HTTP.get(payments_url, headers=headers, params=payments_params)
         payments_resp.raise_for_status()
         
         payments_data = payments_resp.json()
         payments = payments_data.get("payments", [])
         
-        if not payments:
-            print(f"ℹ️ No payments found for invoice {invoice_id}")
-            return None
-        
         # Find the earliest payment date
         valid_payments = [p for p in payments if p.get("date")]
-        
-        if not valid_payments:
-            print(f"ℹ️ No valid payment dates found for invoice {invoice_id}")
-            return None
         
         # Sort by date and get the earliest
         earliest_payment = min(valid_payments, key=lambda p: p["date"])
@@ -646,9 +636,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     so_numbers = re.findall(r"(?i)SO-\d+", reference) if reference else []
     so_info_by_sku = {}
     
-    print(f"\nDebug: Reference = '{reference}'")
-    print(f"Debug: Found SO numbers = {so_numbers}")
-    
     # Get sales orders if found
     if so_numbers:
         for so_num in so_numbers:
@@ -663,11 +650,9 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                 )
                 search_data = search_response.json()
                 salesorders = search_data.get("salesorders", [])
-                print(f"Debug: Found {len(salesorders)} sales orders")
                 
                 for so in salesorders:
                     if so.get("salesorder_number", "").upper() == so_num:
-                        print(f"Debug: Found exact match for {so_num}")
                         salesorder_id = so.get("salesorder_id")
                         # Now get the full sales order with line items
                         so_detail_url = f"https://www.zohoapis.com/inventory/v1/salesorders/{salesorder_id}"
@@ -710,8 +695,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                 )
                                 invoices_response.raise_for_status()
                                 invoices = invoices_response.json().get("invoices", [])
-
-                                print(f"Debug: Found {len(invoices)} invoices for SO {so_num}")
 
                                 # Find the first paid/partially_paid invoice for this SO
                                 target_invoice = None
@@ -759,18 +742,11 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                             except Exception as e:
                                 print(f"Debug: Error fetching invoices for SO {so_num}: {e}")
 
-
-                        print(f"Debug: Delivery date = {delivery_date_range}")
                         line_items = so_detail.get("line_items", [])
-
-                        
-                        print(f"Debug: Found {len(line_items)} line items in SO {so_num}")
-                        
                         # Process ALL line items - NO break here
                         for item in line_items:
                             sku = item.get("sku")
                             item_name = item.get("name")
-                            print(f"Debug: SO Item - Name: {item_name}, SKU: {sku}")
                             if sku:
                                 so_info_by_sku[sku] = {
                                     "SO": so_num,
@@ -792,11 +768,9 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                 continue
     
     # Debug: Print PO items
-    print(f"\nDebug: PO {po_number} has {len(po.get('line_items', []))} items")
     for idx, item in enumerate(po.get("line_items", []), 1):
         sku = item.get("sku")
         matched = "Yes" if sku in so_info_by_sku else "No"
-        print(f"Debug: PO Item {idx} - Name: {item.get('name')}, SKU: {sku}, Matched: {matched}")
     
     # Create DataFrame - ALWAYS create for every PO
     items = []
