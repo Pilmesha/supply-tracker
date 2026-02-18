@@ -727,7 +727,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     raw_payment_date = get_first_payment_date(invoice_id)
                                     if raw_payment_date:
                                         try:
-                                            first_payment_date = datetime.strptime(raw_payment_date, "%d-%m-%Y").date()
+                                            first_payment_date = datetime.strptime(raw_payment_date, "%Y-%m-%d").date()
                                         except ValueError:
                                             print(f"Debug: Unexpected payment date format: {raw_payment_date}")
                                             first_payment_date = None
