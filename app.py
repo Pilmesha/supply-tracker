@@ -581,32 +581,45 @@ def load_hach_reference_values() -> set[str]:
     wb.close()
     return hach_values
 def get_first_payment_date(invoice_id):
-    headers = {"Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"}
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
+        "X-com-zoho-inventory-organizationid": ORG_ID
+    }
+
     try:
-        # Get payments using the internal invoice ID
         payments_url = f"https://www.zohoapis.com/inventory/v1/invoices/{invoice_id}/payments"
-        payments_params = {"organization_id": ORG_ID}
-        payments_resp = HTTP.get(payments_url, headers=headers, params=payments_params)
+
+        payments_resp = HTTP.get(payments_url, headers=headers)
         payments_resp.raise_for_status()
-        
-        payments_data = payments_resp.json()
-        payments = payments_data.get("payments", [])
-        
-        # Find the earliest payment date
-        valid_payments = [p for p in payments if p.get("date")]
-        
-        # Sort by date and get the earliest
-        earliest_payment = min(valid_payments, key=lambda p: p["date"])
-        earliest_date = earliest_payment["date"]
-        
-        print(f"✅ Earliest payment date: {earliest_date}")
-        return earliest_date
-        
+
+        payments = payments_resp.json().get("payments", [])
+
+        if not payments:
+            print(f"ℹ️ No payments found for invoice {invoice_id}")
+            return None
+
+        valid_dates = []
+
+        for p in payments:
+            raw_date = p.get("date")
+            if raw_date:
+                try:
+                    parsed_date = datetime.strptime(raw_date[:10], "%Y-%m-%d")
+                    valid_dates.append(parsed_date)
+                except ValueError:
+                    print(f"⚠️ Invalid payment date format: {raw_date}")
+
+        if not valid_dates:
+            print(f"ℹ️ No valid payment dates for invoice {invoice_id}")
+            return None
+
+        earliest_date = min(valid_dates)
+        print(f"✅ Earliest payment date: {earliest_date.date()}")
+
+        return earliest_date.strftime("%Y-%m-%d")
+
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            print(f"❌ Invoice {invoice_id} not found")
-        else:
-            print(f"❌ HTTP error for invoice {invoice_id}: {e}")
+        print(f"❌ HTTP error for invoice {invoice_id}: {e}")
         return None
     except Exception as e:
         print(f"❌ Failed to get payment date for {invoice_id}: {e}")
@@ -659,6 +672,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         so_response = HTTP.get(so_detail_url, headers=headers)
                         so_response.raise_for_status()
                         so_detail = so_response.json().get("salesorder", {})
+                        invoices = so_detail.get("invoices", [])
                         delivery_cf = (
                             so_detail
                             .get("custom_field_hash", {})
@@ -688,14 +702,6 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                     delivery_date_range = f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
                         else:
                             try:
-                                invoices_response = HTTP.get(
-                                    "https://www.zohoapis.com/inventory/v1/invoices",
-                                    headers=headers,
-                                    params={"salesorder_id": salesorder_id}
-                                )
-                                invoices_response.raise_for_status()
-                                invoices = invoices_response.json().get("invoices", [])
-
                                 # Find the first paid/partially_paid invoice for this SO
                                 target_invoice = None
                                 for inv in invoices:
