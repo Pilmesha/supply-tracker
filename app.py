@@ -779,7 +779,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         so_data = so_info_by_sku.get(sku, {})
         is_match = "Yes" if sku in so_info_by_sku else "No"
         so_number = so_data.get("SO", "")
-        
+        po_customer = next((f.get("value_formatted")for f in item.get("item_custom_fields", []) if f.get("label") == "Customer" and f.get("value_formatted")),"")
         # Export logic for HACH
         export_value = ""
         if supplier == "HACH":
@@ -797,10 +797,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
             "Code": sku,
             "Reference": reference,
             "შეკვეთილი რაოდენობა": item.get("quantity"),
-            "Customer": so_data.get("SO_Customer") or next(
-                (f.get("value_formatted") for f in item.get("item_custom_fields", []) if f.get("label") == "Customer"),
-                ""
-            ),
+            "Customer": po_customer if po_customer else so_data.get("SO_Customer", ""),
             "SO": so_number,
             "შეკვეთის ჩაბარების ვადა" : so_data.get("SO_Delivery_Date_Range", ""),
             "SO_Customer": so_data.get("SO_Customer", ""),
