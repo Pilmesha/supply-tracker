@@ -937,8 +937,8 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
     f"/items/{FILE_ID}/workbook/tables/{table_name}/range"
     )
-    hdrs = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
-    tbl_range = HTTP.get(tbl_range_url, headers=hdrs, timeout=30).json()["address"]
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
+    tbl_range = HTTP.get(tbl_range_url, headers=headers, timeout=30).json()["address"]
 
     tbl_range = tbl_range.split("!")[-1]  # A1:X57
     (start, end) = tbl_range.split(":")
@@ -948,7 +948,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
     # ------------------ append rows ------------------
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
+    
     payload = {"values": rows}
     resp = HTTP.post(url, headers=headers, json=payload)
 
@@ -1010,7 +1010,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
             f"/items/{FILE_ID}/workbook/worksheets/{sheet_name}"
             f"/range(address='{rng}')/format/fill"
         )
-        HTTP.patch(fill_url, headers=hdrs, json={"color": f"#{r:02X}{g:02X}{b:02X}"})
+        graph_safe_request( "PATCH", fill_url, headers, json={"color": f"#{r:02X}{g:02X}{b:02X}"}).raise_for_status()
     # ------------------ Apply Borders to All Appended Cells ------------------
     end_row = start_row + len(rows) - 1
     full_range = f"{first_col}{start_row}:{last_col}{end_row}"
@@ -1019,7 +1019,6 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         f"/items/{FILE_ID}/workbook/worksheets/{sheet_name}"
         f"/range(address='{full_range}')/format/borders"
     )
-
     border_payload = {
         "style": "Continuous",
         "weight": "Thin",
@@ -1028,11 +1027,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
 
     # Apply border to all edge types
     for border_type in ["EdgeTop","EdgeBottom","EdgeLeft","EdgeRight","InsideHorizontal","InsideVertical"]:
-        HTTP.patch(
-            f"{borders_url}/{border_type}",
-            headers=hdrs,
-            json=border_payload
-        )
+        graph_safe_request("PATCH", f"{borders_url}/{border_type}", headers, json=border_payload).raise_for_status()
 
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
@@ -2519,7 +2514,7 @@ def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_star
             # --- Step 4: Normalize ---
             target_df["Code"] = target_df["Code"].astype(str).str.strip()
             target_df["Supplier Company"] = target_df["Supplier Company"].astype(str)
-
+            target_df["შეკვეთის ჩაბარების ვადა"] = (target_df["შეკვეთის ჩაბარების ვადა"].astype(str).str.strip().replace("nan", ""))
             # --- Step 5: Apply delivery dates (SO + SKU, NON-HACH only) ---
             so_sku_mask = (
                 (target_df["SO"] == salesorder_number) &
@@ -2527,12 +2522,12 @@ def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_star
             )
 
             if delivery_start == delivery_end:
-                target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = delivery_start
+                delivery_value = delivery_start
             else:
-                target_df.loc[so_sku_mask, "შეკვეთის ჩაბარების ვადა"] = (
-                    f"{delivery_start} – {delivery_end}"
-                )
-
+                delivery_value = f"{delivery_start} – {delivery_end}"
+            empty_mask = target_df["შეკვეთის ჩაბარების ვადა"] == ""
+            final_mask = so_sku_mask & empty_mask
+            target_df.loc[final_mask, "შეკვეთის ჩაბარების ვადა"] = delivery_value
             # --- Step 6: Write back to Excel ---
             for col_idx, col_name in enumerate(target_df.columns, start=1):
                 ws.cell(row=1, column=col_idx).value = col_name
