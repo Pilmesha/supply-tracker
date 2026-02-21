@@ -672,6 +672,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         so_response = HTTP.get(so_detail_url, headers=headers)
                         so_response.raise_for_status()
                         so_detail = so_response.json().get("salesorder", {})
+                        delivery_condition = (so_detail.get("custom_field_hash", {}).get("cf_payment_conditions", ""))
                         invoices = so_detail.get("invoices", [])
                         delivery_cf = (
                             so_detail
@@ -679,8 +680,25 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                             .get("cf_delivery_after_payment", "")
                         )
                         delivery_date_range = None  # e.g. "10/02/2026 - 20/02/2026"
+                        if isinstance(delivery_condition, str) and "after delivery" in delivery_condition.lower():
+                            today = datetime.today().date()
+                            match = re.search(r"(\d+)(?:\s*-\s*(\d+))?\s*(weeks?|კვირ\w*)", delivery_cf.lower())
+                            if match:
+                                start_w = int(match.group(1))
+                                end_w = int(match.group(2)) if match.group(2) else start_w
 
-                        if isinstance(delivery_cf, str) and "ხელშეკრულებიდან" in delivery_cf:
+                                start_date = today + timedelta(weeks=start_w)
+                                end_date = today + timedelta(weeks=end_w)
+
+                                start_str = start_date.strftime("%d/%m/%Y")
+                                end_str = end_date.strftime("%d/%m/%Y")
+
+                                delivery_date_range = (
+                                    start_str
+                                    if start_str == end_str
+                                    else f"{start_str} - {end_str}"
+                                )
+                        elif isinstance(delivery_cf, str) and "ხელშეკრულებიდან" in delivery_cf:
                             range_match = re.search(r"(\d+)\s*[-–]\s*(\d+)\s*ხელშეკრულებიდან", delivery_cf)
                             single_match = re.search(r"(\d+)\s*ხელშეკრულებიდან", delivery_cf)
                             today = datetime.today().date()
@@ -931,6 +949,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         return trans_lookup.get(normalized, "")
     
     out_df["თარგმანი"] = out_df["Item"].apply(get_translation)
+    out_df['ადგილმდებარეობა'] = "წარმოების პროცესში"
     # --------------------------------------------------
     # 3️⃣ Final export
     # --------------------------------------------------
@@ -1507,32 +1526,43 @@ def process_message(mailbox, message_id, message_date, internet_id):
     if att_resp.status_code != 200:
         print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
         return
-
     attachments = att_resp.json().get("value", [])
+    po_text_map = {}
 
-    # ✅ Check for exactly one PDF
     pdf_attachments = [
         att for att in attachments
-        if att.get("name", "").lower().endswith(".pdf") or att.get("contentType") == "application/pdf"
+        if att.get("name", "").lower().endswith(".pdf")
+        or att.get("contentType") == "application/pdf"
     ]
 
-    if len(pdf_attachments) != 1:
-        print(f"ℹ️ Not a logistics mail (PDF count = {len(pdf_attachments)}) → skipping")
+    if not pdf_attachments:
+        print("ℹ️ No PDF attachments found")
         return
-    
-    if "contentBytes" not in att:
-        print("❌ Attachment has no contentBytes - skipping")
-        return
-    # --- 2. Loop over attachments, decode and extract text directly ---
-    all_text = ""
-    att = pdf_attachments[0]
-    content = base64.b64decode(att['contentBytes'])
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            all_text += (page.extract_text() or "") + "\n"
-        # --- 3. Extract PO number (first occurrence) ---
-    po_match = re.search(r"PO-\d+", all_text)
-    po_number = po_match.group(0) if po_match else None
+
+    for att in pdf_attachments:
+
+        if "contentBytes" not in att:
+            print(f"❌ Attachment {att.get('name')} has no contentBytes - skipping")
+            continue
+
+        print(f"📎 Processing PDF: {att.get('name')}")
+
+        content = base64.b64decode(att["contentBytes"])
+        all_text = ""
+
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                all_text += (page.extract_text() or "") + "\n"
+
+        po_match = re.search(r"PO-\d+", all_text)
+        po_number = po_match.group(0) if po_match else None
+
+        if not po_number:
+            print(f"⚠️ No PO found in {att.get('name')} → skipping")
+            continue
+
+        po_text_map[po_number] = all_text
+        print(f"🎯 Found PO {po_number}")
     if isinstance(message_date, str):
         dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
     elif isinstance(message_date, datetime):
@@ -1540,10 +1570,8 @@ def process_message(mailbox, message_id, message_date, internet_id):
     else:
         print(f"⚠️ Unexpected message_date type: {type(message_date)}")
         return
+
     confirmation_date = dt.date()
-    if not po_number:
-        print("ℹ️ No PO found in PDF → skipping Excel update")
-        return
     with EXCEL_LOCK:
         file_stream = None
         wb = None
@@ -1581,29 +1609,40 @@ def process_message(mailbox, message_id, message_date, internet_id):
             print("❌ Gave up downloading files after multiple attempts")
             return
 
-        if po_number:
-            print(f"🎯 Found PO number: {po_number}")
+        if not po_text_map:
+            print("ℹ️ No PO found in any PDF → skipping Excel update")
+            return
+
+        updated_rows = 0
+
+        for po_number, all_text in po_text_map.items():
+
+            print(f"\n🔄 Updating Excel for PO {po_number}")
 
             matching_idx = orders_df.index[orders_df["PO"] == po_number]
 
-            updated_rows = 0
+            if len(matching_idx) == 0:
+                print(f"⚠️ No Excel rows found for PO {po_number}")
+                continue
 
             for idx in matching_idx:
+
                 code = str(orders_df.at[idx, "Code"]).strip()
-                print(f"\n🔍 Processing code: '{code}'")
+                print(f"🔍 Checking code: {code}")
 
-                # Check if this code appears in the PDF text
                 if code and code in all_text:
-                    print(f"✅ Match found for code {code} in PDF")
+                    print(f"✅ Code {code} found in PDF")
 
-                    # Fill confirmation date
-                    if pd.isna(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]) or orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] == "":
+                    current_val = orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]
+
+                    if pd.isna(current_val) or current_val == "":
                         orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = confirmation_date
                         updated_rows += 1
                         print("   Filled confirmation date")
-            if updated_rows == 0:
-                print("⚠️ No matching item codes found in this confirmation message.")
-                return
+
+        if updated_rows == 0:
+            print("⚠️ No matching item codes found in any confirmation PDFs.")
+            return
 
         # 🟢 after loop, update sheet once:
         ws = wb["მიმდინარე "]
@@ -1890,54 +1929,73 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
         return
 
     attachments = att_resp.json().get("value", [])
-    all_text_pages = []
+    pdf_attachments = [
+        att for att in attachments
+        if att.get("name", "").upper().startswith("SO_")
+        and att.get("name", "").lower().endswith(".pdf")
+    ]
 
-    for att in attachments:
-        if 'contentBytes' in att and att['name'].lower().endswith('.pdf'):
-            content = base64.b64decode(att['contentBytes'])
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                for page in pdf.pages:
-                    text = page.extract_text() or ""
-                    # Normalize spaces
-                    text = re.sub(r'\s+', ' ', text)
-                    all_text_pages.append(text)
-
-    # --- Extract PO number from PDF (first occurrence across all pages) ---
-    po_number = None
-    for page_text in all_text_pages:
-        po_match = re.search(r"PO-\d+", page_text)
-        if po_match:
-            po_number = po_match.group(0)
-            break
-
-    if not po_number:
-        print("❌ PO number not found in PDF, skipping processing")
+    if not pdf_attachments:
+        print("⚠️ No matching SO_ PDF attachments found")
         return
+    item_results_by_po = {}
+    for att in pdf_attachments:
+        print(f"📎 Processing attachment: {att['name']}")
 
-    print(f"🎯 Found PO number: {po_number}")
+        content = base64.b64decode(att['contentBytes'])
 
-    # --- Build item info dictionary (code -> week, quantity) ---
-    item_week_pattern = re.compile(r'([A-Z0-9]{10,})\s*Week\s*(\d{1,2}/\d{4})', re.IGNORECASE)
-    quantity_pattern = re.compile(r'(\d+)\s*pcs', re.IGNORECASE)
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            pdf_text_pages = []
 
-    items_info = {}  # code -> {week, quantity}
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                text = re.sub(r'\s+', ' ', text)
+                pdf_text_pages.append(text)
 
-    for page_text in all_text_pages:
-        # normalize multiple spaces
-        page_text = re.sub(r'\s+', ' ', page_text)
-        
-        for match in item_week_pattern.finditer(page_text):
-            code = match.group(1)
-            week = match.group(2)
-            start_pos = max(match.start() - 100, 0)
-            qty_search = page_text[start_pos:match.start()]
-            qty_matches = list(quantity_pattern.finditer(qty_search))
-            quantity = int(qty_matches[-1].group(1)) if qty_matches else None
-            items_info[code] = {"week": week, "quantity": quantity}
+        # --- Extract PO from THIS PDF ---
+        po_number = None
+        for page_text in pdf_text_pages:
+            po_match = re.search(r"PO-\d+", page_text)
+            if po_match:
+                po_number = po_match.group(0)
+                break
 
-    print(items_info)
+        if not po_number:
+            print(f"❌ PO number not found in {att['name']}, skipping")
+            continue
+
+        print(f"🎯 Found PO: {po_number}")
+
+        # --- Extract items for THIS PDF ---
+        item_week_pattern = re.compile(r'([A-Z0-9]{10,})\s*Week\s*(\d{1,2}/\d{4})', re.IGNORECASE)
+        quantity_pattern = re.compile(r'(\d+)\s*pcs', re.IGNORECASE)
+
+        items_info = {}
+
+        for page_text in pdf_text_pages:
+            page_text = re.sub(r'\s+', ' ', page_text)
+
+            for match in item_week_pattern.finditer(page_text):
+                code = match.group(1)
+                week = match.group(2)
+
+                start_pos = max(match.start() - 100, 0)
+                qty_search = page_text[start_pos:match.start()]
+
+                qty_matches = list(quantity_pattern.finditer(qty_search))
+                quantity = int(qty_matches[-1].group(1)) if qty_matches else None
+
+                items_info[code] = {
+                    "week": week,
+                    "quantity": quantity
+                }
+
+        item_results_by_po[po_number] = items_info
+
+    print(item_results_by_po)
+       
     if not items_info:
-        print("⚠️ No item codes found in PDF")
+        print("⚠️ No item codes found in PDFs")
         return
 
     # --- Update Excel only for rows with this PO ---
@@ -1977,37 +2035,56 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
         else:
             print("❌ Gave up downloading files after multiple attempts")
             return
-        po_rows = orders_df[orders_df["PO"] == po_number]
-
-        if po_rows.empty:
-            print(f"⚠️ No rows in Excel match PO {po_number}")
-            return
-
         updated_rows = 0
-        for i, row in po_rows.iterrows():  # Only rows for this PO
-            code = str(row["Code"]).strip()
-            if code in items_info:
+
+        for po_number, items_info in item_results_by_po.items():
+
+            po_rows = orders_df[orders_df["PO"] == po_number]
+
+            if po_rows.empty:
+                print(f"⚠️ No Excel rows found for PO {po_number}")
+                continue
+
+            for i, row in po_rows.iterrows():
+
+                code = str(row["Code"]).strip()
+
+                if code not in items_info:
+                    print(f"⚠️ Code {code} not found in PDF for PO {po_number}")
+                    continue
+
                 info = items_info[code]
+
+                # --- Update week ---
                 current_week = orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"]
-                # Fill week
+
                 if is_empty(current_week):
-                    orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = f'{confirmation_date} (Week {info["week"]})'
-                # Fill quantity
+                    orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = \
+                        f"{confirmation_date} (Week {info['week']})"
+
+                # --- Update quantity ---
                 if info["quantity"] is not None:
                     orders_df.at[i, "რეალურად გამოგზავნილი რაოდენობა"] = info["quantity"]
+
                 updated_rows += 1
-                print(f"✅ Updated code {code}: Week={info['week']}, Quantity={info['quantity']}")
-            else:
-                print(f"⚠️ Code {code} not found in PDF for PO {po_number}")
+                print(f"✅ Updated PO {po_number} | Code {code}")
 
         if updated_rows == 0:
-            print("⚠️ No matching item codes were updated for this PO")
+            print("⚠️ No rows were updated")
+
+        # =====================================================
+        # ⭐ Write Back To Excel
+        # =====================================================
+
         for i, row in orders_df.iterrows():
             excel_row = row["_excel_row"]
+
             for col_idx, col_name in enumerate(orders_df.columns, start=1):
                 if col_name == "_excel_row":
                     continue
+
                 ws.cell(row=excel_row, column=col_idx).value = row[col_name]
+
                 if col_name == "Confirmation-ის მოსვლის თარიღი" and row[col_name]:
                     ws.cell(row=excel_row, column=col_idx).number_format = "DD/MM/YYYY"
 
@@ -2330,36 +2407,24 @@ def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
 
         attachments = att_resp.json().get("value", [])
 
-        # --- Step 3: Select Khrone packing list PDF ---
-        pdf_att = None
+        # --- Step 3: Collect ALL Khrone packing list PDFs ---
+        packing_pdfs = []
+
         for att in attachments:
             name = att.get("name", "")
-            if name.lower().endswith(".pdf") and re.search(r"(?i)\d{3}-\d{6} (?:Copy )?Packing list", name):
-                pdf_att = att
-                break
+            if (
+                name.lower().endswith(".pdf")
+                and re.search(r"\d{3}-\d{6}.*(copy\s*packing\s*list|plc)", name, re.IGNORECASE)
+                and "contentBytes" in att
+            ):
+                packing_pdfs.append(att)
 
-        if not pdf_att or "contentBytes" not in pdf_att:
-            print("⚠️ No Khrone packing list PDF found in attachments or missing contentBytes")
+        if not packing_pdfs:
+            print("⚠️ No Khrone packing list PDFs found")
             return
 
-        pdf_bytes = base64.b64decode(pdf_att['contentBytes'])
-        all_text = ""
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                all_text += (page.extract_text() or "") + "\n"
-        # --- Step 4: Extract PO number ---
-        po_match = re.search(r"Your Order\s*:?\s*(PO-\d+)", all_text)
-        po_number = po_match.group(1) if po_match else None
-        print(po_number)
-
-        if not po_number:
-            print("⚠️ PO number not found in packing list PDF")
-            return
-
-        print(f"🎯 Found PO number: {po_number}")
-
-        pdf_lines = [line.strip() for line in all_text.splitlines() if line.strip()]
-        items = []
+        # --- Extract PO → items mapping ---
+        po_items_map = {}
 
         def parse_quantity(qty_str):
             try:
@@ -2367,49 +2432,90 @@ def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
             except:
                 return None
 
-        for code in orders_df.loc[orders_df["PO"] == po_number, "Code"]:
-            found = False
-            for i, line in enumerate(pdf_lines):
-                if code in line:
-                    # Look 1–3 lines above for quantity line
-                    for j in range(1, 4):
-                        if i-j < 0:
-                            continue
-                        qty_line = pdf_lines[i-j]
-                        # Take the first number in the line as Delivered Quantity
-                        qty_match = re.search(r"(\d+,\d+)", qty_line)
-                        if qty_match:
-                            qty = parse_quantity(qty_match.group(1))
-                            if qty is not None:
-                                items.append({"Code": code, "Quantity": qty})
-                                print(f"✅ Matched code {code} with quantity {qty}")
-                                found = True
-                                break
-                    if not found:
-                        print(f"⚠️ Quantity not found for code {code} near line {i}")
-                    break
-            else:
-                print(f"⚠️ Code {code} not found in PDF")
+        for pdf_att in packing_pdfs:
 
+            print(f"📎 Processing packing list: {pdf_att.get('name')}")
+
+            pdf_bytes = base64.b64decode(pdf_att["contentBytes"])
+            all_text = ""
+
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                for page in pdf.pages:
+                    all_text += (page.extract_text() or "") + "\n"
+
+            # --- Extract PO number ---
+            po_match = re.search(r"Your Order\s*:?\s*(PO-\d+)", all_text)
+            po_number = po_match.group(1) if po_match else None
+
+            if not po_number:
+                print("⚠️ PO number not found in this PDF")
+                continue
+            print(f"🎯 Found PO: {po_number}")
+
+            pdf_lines = [line.strip() for line in all_text.splitlines() if line.strip()]
+            items = []
+            # Only check codes belonging to this PO
+            po_codes = orders_df.loc[orders_df["PO"] == po_number, "Code"]
+            for code in po_codes:
+                found = False
+
+                for i, line in enumerate(pdf_lines):
+                    if re.search(rf"\b{re.escape(str(code))}\b", line):
+
+                        # Look 1–3 lines above
+                        for j in range(1, 4):
+                            if i - j < 0:
+                                continue
+
+                            qty_line = pdf_lines[i - j]
+                            qty_match = re.search(r"(\d+,\d+)", qty_line)
+
+                            if qty_match:
+                                qty = parse_quantity(qty_match.group(1))
+                                if qty is not None:
+                                    items.append({"Code": code, "Quantity": qty})
+                                    print(f"✅ Matched code {code} with quantity {qty}")
+                                    found = True
+                                    break
+                        if not found:
+                            print(f"⚠️ Quantity not found near code {code}")
+                        break
+                if not found:
+                    print(f"⚠️ Code {code} not found in PDF")
+            if items:
+                po_items_map[po_number] = items
         updated_rows = 0
-        for item in items:
-            code = item["Code"]
-            qty = item["Quantity"]
 
-            # Find Excel rows for this code and PO
-            mask = (orders_df["PO"] == po_number) & (orders_df["Code"] == code)
-            if mask.any():
-                for idx in orders_df.index[mask]:
-                    # Update quantity and confirmation date
-                    orders_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = qty
-                    orders_df.at[idx, "ტვირთი მზადაა ასაღებად"] = confirmation_date
-                    updated_rows += 1
-                    print(f"✅ Updated code {code} with quantity {qty}")
-            else:
-                print(f"⚠️ Code {code} not found for PO {po_number} in Excel")
+        for po_number, items in po_items_map.items():
+
+            print(f"\n🔄 Updating Excel for PO {po_number}")
+
+            for item in items:
+                code = item["Code"]
+                qty = item["Quantity"]
+
+                mask = (orders_df["PO"] == po_number) & (orders_df["Code"] == code)
+
+                if mask.any():
+                    for idx in orders_df.index[mask]:
+
+                        # Update quantity
+                        orders_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = qty
+
+                        # Update ready date (overwrite logic same as before)
+                        current_val = orders_df.at[idx, "ტვირთი მზადაა ასაღებად"]
+
+                        if pd.isna(current_val) or current_val == "":
+                            orders_df.at[idx, "ტვირთი მზადაა ასაღებად"] = confirmation_date
+
+                        updated_rows += 1
+                        print(f"✅ Updated code {code} for PO {po_number}")
+
+                else:
+                    print(f"⚠️ Code {code} not found in Excel for PO {po_number}")
 
         if updated_rows == 0:
-            print("⚠️ No codes matched in Excel for this packing list")
+            print("⚠️ No rows updated from packing lists")
 
         # --- Step 6: Save back to Excel and upload ---
         ws = wb["მიმდინარე "]
@@ -2681,9 +2787,17 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
 
 
 def send_email(customer_name:str, customer_mail:str, attachments):
+    EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    if not customer_mail or not isinstance(customer_mail, str):
+        print("⚠️ Missing customer email — skipping")
+        return
+    customer_mail = customer_mail.strip()
+    if not EMAIL_REGEX.match(customer_mail):
+        print(f"⚠️ Invalid email format: {customer_mail} — skipping")
+        return
     #Customers who receive SPECIAL text
     specials = {
-        "NEA","UWSCG", "Gardabani TPP", "Gardabani TPP 1"
+        "NEA","UWSCG", "Gardabani TPP", "Gardabani TPP 1",
         "Gardabani TPP2","Georgian Technical University (GTU)","Batumi Water"
     }
 
@@ -3073,7 +3187,7 @@ def webhook():
 
     if request.method != "POST":
         return jsonify({"status": "active"}), 200
-
+    
     try:
         data = request.json or {}
         notifications = data.get("value", [])
@@ -3097,7 +3211,7 @@ def webhook():
 
         for notification in notifications:
             resource = notification.get("resource", "")
-            message_url = f"{GRAPH_URL}/{resource}?$select=internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime"
+            message_url = f"{GRAPH_URL}/{resource}?$select=id,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,body"
 
             message_response = safe_request(
                 "get",
@@ -3131,6 +3245,9 @@ def webhook():
 
             if not message_id:
                 continue
+            if sender_email in MAILBOXES_2:
+                print("↩️ Ignoring self-sent email")
+                continue
 
             to_emails = [
                 r.get("emailAddress", {}).get("address", "")
@@ -3159,9 +3276,20 @@ def webhook():
             if cc_emails:
                 print(f"   CC: {', '.join(cc_emails)}")
             print("-" * 60)
+            # --- Extract message body text ---
+            body_content = ""
 
+            try:
+                body_content = (
+                    message.get("body", {})
+                    .get("content", "")
+                    .lower()
+                )
+            except Exception:
+                body_content = ""
             is_khrone = sender_email.endswith("@krohne.com")
             is_hach = sender_email.endswith("@hach.com")
+            is_atb = sender_email.endswith("@atbwater.com")
             has_po_generic = re.search(r'PO-\d+', subject, re.IGNORECASE)
 
             # 1️⃣ KHRONE readiness (single check)
@@ -3176,7 +3304,7 @@ def webhook():
                 )
 
             # 2️⃣ KHRONE O/A
-            elif is_khrone and khrone_oa_pattern.search(subject):
+            elif is_khrone and (khrone_oa_pattern.search(subject) or khrone_oa_pattern.search(body_content)):
                 print("✅ Khrone O/A → process_khrone_message")
                 POOL.submit(
                     process_khrone_message,
@@ -3215,7 +3343,7 @@ def webhook():
                     print("ℹ️ Hach mail ignored (no PO or Greenlight)")
 
             # 4️⃣ Generic PO
-            elif has_po_generic:
+            elif has_po_generic or is_atb:
                 print("↪️ Generic PO mail → process_message")
                 POOL.submit(
                     process_message,
