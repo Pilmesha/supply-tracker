@@ -10,6 +10,7 @@ from urllib3.util.retry import Retry
 import traceback
 from collections import defaultdict
 import sqlite3
+from watcher import start_watcher
 load_dotenv()
 
 #======CONGIF=====
@@ -71,7 +72,7 @@ conn.commit()
 
 
 app = Flask(__name__)
-
+start_watcher()
 
 # ======= AUTH ===========
 def refresh_access_token() -> str:
