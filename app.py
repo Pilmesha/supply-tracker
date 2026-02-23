@@ -3233,6 +3233,9 @@ def webhook():
 
             # --- Message fields ---
             subject = message.get("subject", "").strip()
+            if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE):
+                print("↩️ Reply/forward ignored")
+                continue
 
             sender_email = (
                 message.get("from", {})
@@ -3292,7 +3295,6 @@ def webhook():
             is_hach = sender_email.endswith("@hach.com")
             is_atb = sender_email.endswith("@atbwater.com")
             has_po_generic = re.search(r'PO-\d+', subject, re.IGNORECASE)
-
             # 1️⃣ KHRONE readiness (single check)
             if is_khrone and "notification of readiness of goods:" in subject.lower():
                 print("✅ Khrone packing list → process_khrone_packing_list")
