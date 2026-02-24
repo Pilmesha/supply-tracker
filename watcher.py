@@ -151,45 +151,62 @@ def assign_ids(file_bytes):
     wb = load_workbook(BytesIO(file_bytes))
     global_ws = wb["__GLOBAL__"]
 
+    TARGET_COLUMNS = [1, 9]  # B and J
     used_ids = set()
 
+    # -------- FIRST PASS: Collect existing IDs --------
     for ws in wb.worksheets:
         if ws.title == "__GLOBAL__":
             continue
 
-        for row in ws.iter_rows(min_row=2):
-            name = row[1].value
-            if isinstance(name, str):
-                m = ID_RE.search(name)
-                if m:
-                    used_ids.add(int(m.group(1)))
+        for row in ws.iter_rows():
+            for col_index in TARGET_COLUMNS:
+                if col_index < len(row):
+                    value = row[col_index].value
+                    if isinstance(value, str):
+                        m = ID_RE.search(value)
+                        if m:
+                            used_ids.add(int(m.group(1)))
 
     last_id = max(used_ids) if used_ids else 0
     changed = False
 
+    # -------- SECOND PASS: Assign new IDs --------
     for ws in wb.worksheets:
         if ws.title == "__GLOBAL__":
             continue
 
-        for row in ws.iter_rows(min_row=2):
-            cell = row[1]
-            name = cell.value
+        for row in ws.iter_rows():
+            for col_index in TARGET_COLUMNS:
 
-            if not isinstance(name, str) or not name.strip():
-                continue
+                if col_index >= len(row):
+                    continue
 
-            if ID_RE.search(name):
-                continue
+                cell = row[col_index]
+                name = cell.value
 
-            new_id = 1
-            while new_id in used_ids:
-                new_id += 1
+                if not isinstance(name, str) or not name.strip():
+                    continue
 
-            used_ids.add(new_id)
-            cell.value = f"{name}_{new_id:04d}"
-            changed = True
-            last_id = max(last_id, new_id)
+                if ID_RE.search(name):
+                    continue
 
+                if name.strip().lower() in {
+                    "მოსალოდნელი პროექტი",
+                    "მიმდინარე პროექტი",
+                    "პროექტი"
+                }:
+                    continue
+
+                # Generate next free ID
+                new_id = max(used_ids, default=0) + 1
+
+                used_ids.add(new_id)
+                cell.value = f"{name}_{new_id:04d}"
+                changed = True
+                last_id = max(last_id, new_id)
+
+    # -------- SAVE IF CHANGED --------
     if changed:
         global_ws["B1"].value = last_id
 
