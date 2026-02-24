@@ -198,28 +198,52 @@ def assign_ids(file_bytes):
 def watcher_loop():
     logging.info("Watcher started.")
 
+    STABILITY_SECONDS = 20  # Wait this long without changes
+    last_seen = None
+    last_change_time = None
+
     try:
         last_seen, _ = get_file_metadata()
     except Exception:
         logging.exception("Initial metadata fetch failed.")
-        last_seen = None
 
     while True:
         try:
             modified, etag = get_file_metadata()
 
+            # File changed
             if modified != last_seen:
-                logging.info("File changed. Processing...")
-                file_bytes = download_excel()
-                result, last_id = assign_ids(file_bytes)
+                logging.info("Change detected. Waiting for stability...")
+                last_seen = modified
+                last_change_time = time.time()
 
-                if result:
-                    success = upload_excel(result, etag)
-                    if success:
-                        logging.info(f"IDs assigned. Last ID = {last_id}")
-                        last_seen = modified
-                else:
-                    last_seen = modified
+            # If change was detected earlier, wait until stable
+            if last_change_time:
+                time_since_change = time.time() - last_change_time
+
+                # Check if file changed again during waiting
+                current_modified, _ = get_file_metadata()
+
+                if current_modified != last_seen:
+                    # File changed again — reset timer
+                    last_seen = current_modified
+                    last_change_time = time.time()
+                    logging.info("File changed again. Resetting stability timer.")
+                
+                elif time_since_change >= STABILITY_SECONDS:
+                    # File is stable — now process
+                    logging.info("File stable. Processing...")
+
+                    file_bytes = download_excel()
+                    result, last_id = assign_ids(file_bytes)
+
+                    if result:
+                        _, fresh_etag = get_file_metadata()
+                        success = upload_excel(result, fresh_etag)
+                        if success:
+                            logging.info(f"IDs assigned. Last ID = {last_id}")
+
+                    last_change_time = None  # reset timer
 
         except Exception:
             logging.exception("Watcher loop error")
