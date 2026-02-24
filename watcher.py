@@ -126,14 +126,23 @@ def upload_excel(data, etag):
     headers = graph_headers()
     headers["If-Match"] = etag   # 🔥 THE MAGIC LINE
 
-    resp = requests.put(url, headers=headers, data=data, timeout=30)
+    for attempt in range(10):  # try for up to ~2 minutes
+        resp = requests.put(url, headers=headers, data=data, timeout=30)
 
-    if resp.status_code == 412:
-        logging.warning("Upload rejected — file changed during processing. Skipping.")
-        return False
+        if resp.status_code == 423:
+            logging.info("File locked during upload. Waiting 10s...")
+            time.sleep(10)
+            continue
 
-    resp.raise_for_status()
-    return True
+        if resp.status_code == 412:
+            logging.warning("Upload rejected — file changed during processing.")
+            return False
+
+        resp.raise_for_status()
+        return True
+
+    logging.warning("Upload skipped — file remained locked.")
+    return False
 
 
 # ================= EXCEL =================
@@ -242,8 +251,11 @@ def watcher_loop():
                         success = upload_excel(result, fresh_etag)
                         if success:
                             logging.info(f"IDs assigned. Last ID = {last_id}")
-
-                    last_change_time = None  # reset timer
+                            last_seen = modified
+                        else:
+                            logging.info("Upload failed (likely locked). Will retry next cycle.")
+                    if success:
+                        last_change_time = None  # reset timer
 
         except Exception:
             logging.exception("Watcher loop error")
