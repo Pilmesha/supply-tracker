@@ -151,7 +151,7 @@ def assign_ids(file_bytes):
     wb = load_workbook(BytesIO(file_bytes))
     global_ws = wb["__GLOBAL__"]
 
-    TARGET_COLUMNS = [1, 9]  # B and J
+    TARGET_COLUMNS = [9,1]  # J and B
     used_ids = set()
 
     # -------- FIRST PASS: Collect existing IDs --------
