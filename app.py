@@ -1437,7 +1437,8 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
                 .str.lower()
             )
             po_mask = target_df["PO"] == po_str
-            target_df.loc[po_mask, "ჩამოსვლის თარიღი"] = (pd.to_datetime(date) - pd.Timedelta(days=2)).date()
+            date_value = (pd.to_datetime(date) - pd.Timedelta(days=2)).strftime("%d-%m-%Y")
+            target_df.loc[po_mask, "ჩამოსვლის თარიღი"] = date_value
             # --- Step 4: Order-preserving fill ---
             updated = 0
 
