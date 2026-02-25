@@ -3233,7 +3233,11 @@ def webhook():
             internet_id = message.get("internetMessageId")
 
             # --- Message fields ---
-            subject = message.get("subject", "").strip()
+            subject = message.get("subject")
+            if subject is None:
+                subject = ""
+            else:
+                subject = subject.strip()
             if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE):
                 print("↩️ Reply/forward ignored")
                 continue
