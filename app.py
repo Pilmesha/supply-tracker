@@ -3238,9 +3238,6 @@ def webhook():
                 subject = ""
             else:
                 subject = subject.strip()
-            if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE):
-                print("↩️ Reply/forward ignored")
-                continue
 
             sender_email = (
                 message.get("from", {})
@@ -3248,16 +3245,19 @@ def webhook():
                 .get("address", "")
                 .lower()
             )
-
+            if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE) and not sender_email.endswith("@atbwater.com"):
+                print("↩️ Reply/forward ignored")
+                continue
             message_id = message.get("id")
             message_date = message.get("receivedDateTime")
 
             if not message_id:
                 continue
+            
             if sender_email in MAILBOXES_2:
                 print("↩️ Ignoring self-sent email")
                 continue
-
+            
             to_emails = [
                 r.get("emailAddress", {}).get("address", "")
                 for r in message.get("toRecipients", [])
