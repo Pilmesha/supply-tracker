@@ -3245,7 +3245,7 @@ def webhook():
                 .get("address", "")
                 .lower()
             )
-            if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE) and not sender_email.endswith("@atbwater.com"):
+            if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE) and not (sender_email.endswith("@atbwater.com") or sender_email.endswith("@pentair.com")):
                 print("↩️ Reply/forward ignored")
                 continue
             message_id = message.get("id")
