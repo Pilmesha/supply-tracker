@@ -244,7 +244,7 @@ def watcher_loop():
                 last_change_time = time.time()
 
             # If change was detected earlier, wait until stable
-            if last_change_time:
+            if last_change_time is not None:
                 time_since_change = time.time() - last_change_time
 
                 # Check if file changed again during waiting
@@ -257,22 +257,28 @@ def watcher_loop():
                     logging.info("File changed again. Resetting stability timer.")
                 
                 elif time_since_change >= STABILITY_SECONDS:
-                    # File is stable — now process
                     logging.info("File stable. Processing...")
 
-                    file_bytes = download_excel()
-                    result, last_id = assign_ids(file_bytes)
+                    try:
+                        file_bytes = download_excel()
+                        result, last_id = assign_ids(file_bytes)
 
-                    if result:
+                        if not result:
+                            logging.info("No changes to upload.")
+                            return
+
                         _, fresh_etag = get_file_metadata()
                         success = upload_excel(result, fresh_etag)
+
                         if success:
                             logging.info(f"IDs assigned. Last ID = {last_id}")
                             last_seen = modified
+                            last_change_time = None
                         else:
                             logging.info("Upload failed (likely locked). Will retry next cycle.")
-                    if success:
-                        last_change_time = None  # reset timer
+
+                    except Exception:
+                        logging.exception("Processing failed")
 
         except Exception:
             logging.exception("Watcher loop error")
