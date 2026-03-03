@@ -1849,13 +1849,22 @@ def process_hach_message(mailbox, message_id, message_date, internet_id):
 
             week_number = code_week_map[code]
             current_val = row.get("Confirmation 1 (shipment week)")
+            new_val = f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
             if is_empty(current_val):
-                df.at[idx, "Confirmation 1 (shipment week)"] = (
-                    f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
-                )
+                df.at[idx, "Confirmation 1 (shipment week)"] = new_val
                 updated += 1
             else:
-                print(f"ℹ️ Skipped overwrite for code {code} (already has value)")
+                # 2. Extract the week number from the existing string (e.g., "12.05.2024 (week 19)")
+                match = re.search(r"\(week (\d+)\)", str(current_val))
+                existing_week = match.group(1) if match else None
+
+                # 3. Update if the week number doesn't match
+                if existing_week != str(week_number):
+                    df.at[idx, "Confirmation 1 (shipment week)"] = new_val
+                    updated += 1
+                    print(f"✅ Updated week for code {code}: {existing_week} -> {week_number}")
+                else:
+                    print(f"ℹ️ Skipped: Week {week_number} is already correct for code {code}")
 
             updated += 1
 
