@@ -3222,14 +3222,21 @@ def webhook():
                 timeout=20
             )
 
+            # 2. Check for failure BEFORE parsing
             if message_response.status_code != 200:
-                print(
-                    f"❌ Error fetching message: "
-                    f"{message_response.status_code} - {message_response.text}"
-                )
-                continue
+                error_text = message_response.text
+                
+                # 🔥 FIX: Catch the 404/ItemNotFound right here
+                if "ErrorItemNotFound" in error_text:
+                    print("Message already moved or deleted, skipping...")
+                else:
+                    print(f"❌ Error fetching message: {message_response.status_code} - {error_text}")
+                
+                continue # Skip to the next notification
 
+            # 3. If we got here, the status is 200, so parsing is safe
             message = message_response.json()
+
             internet_id = message.get("internetMessageId")
 
             # --- Message fields ---

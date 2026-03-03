@@ -224,7 +224,7 @@ def assign_ids(file_bytes):
 def watcher_loop():
     logging.info("Watcher started.")
 
-    STABILITY_SECONDS = 20  # Wait this long without changes
+    STABILITY_SECONDS = 20 
     last_seen = None
     last_change_time = None
 
@@ -237,53 +237,49 @@ def watcher_loop():
         try:
             modified, etag = get_file_metadata()
 
-            # File changed
+            # 1. Detect New Change
             if modified != last_seen:
-                logging.info("Change detected. Waiting for stability...")
+                logging.info(f"Change detected ({modified}). Waiting for stability...")
                 last_seen = modified
                 last_change_time = time.time()
+                # We don't wait here; we let the loop continue to the stability check
 
-            # If change was detected earlier, wait until stable
+            # 2. Handle Stability Check
             if last_change_time is not None:
                 time_since_change = time.time() - last_change_time
 
-                # Check if file changed again during waiting
-                current_modified, _ = get_file_metadata()
-
-                if current_modified != last_seen:
-                    # File changed again — reset timer
-                    last_seen = current_modified
-                    last_change_time = time.time()
-                    logging.info("File changed again. Resetting stability timer.")
-                
-                elif time_since_change >= STABILITY_SECONDS:
+                if time_since_change >= STABILITY_SECONDS:
                     logging.info("File stable. Processing...")
-
                     try:
                         file_bytes = download_excel()
                         result, last_id = assign_ids(file_bytes)
 
-                        if not result:
-                            logging.info("No changes to upload.")
-                            return
-
-                        _, fresh_etag = get_file_metadata()
-                        success = upload_excel(result, fresh_etag)
-
-                        if success:
-                            logging.info(f"IDs assigned. Last ID = {last_id}")
-                            last_seen = modified
-                            last_change_time = None
+                        if result:
+                            # Use a fresh etag for upload
+                            _, fresh_etag = get_file_metadata()
+                            if upload_excel(result, fresh_etag):
+                                logging.info(f"IDs assigned. Last ID = {last_id}")
+                                # IMPORTANT: Reset last_seen to the newest state after upload
+                                last_seen, _ = get_file_metadata()
+                            else:
+                                logging.warning("Upload failed. Will retry.")
                         else:
-                            logging.info("Upload failed (likely locked). Will retry next cycle.")
+                            logging.info("No changes to upload.")
+                        
+                        # RESET the change timer so we don't process again until a new change occurs
+                        last_change_time = None
 
                     except Exception:
                         logging.exception("Processing failed")
+                        last_change_time = None # Reset anyway to prevent infinite loop
 
         except Exception:
             logging.exception("Watcher loop error")
 
-        time.sleep(POLL_INTERVAL)
+        # Use a shorter sleep if we are waiting for stability, 
+        # otherwise use the full POLL_INTERVAL
+        sleep_time = 5 if last_change_time else POLL_INTERVAL
+        time.sleep(sleep_time)
 _watcher_thread = None
 
 def start_watcher():
