@@ -3270,11 +3270,6 @@ def webhook():
                 .lower()
             )
 
-            # Reply/Forward logic
-            if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE) and not (sender_email.endswith("@atbwater.com") or sender_email.endswith("@pentair.com")):
-                print("↩️ Reply/forward ignored")
-                continue
-
             message_id = message.get("id")
             message_date = message.get("receivedDateTime")
 
@@ -3284,10 +3279,6 @@ def webhook():
             if sender_email in MAILBOXES_2:
                 print("↩️ Ignoring self-sent email")
                 continue
-            
-            # (Rest of your processing logic remains the same...)
-            to_emails = [r.get("emailAddress", {}).get("address", "") for r in message.get("toRecipients", [])]
-            cc_emails = [r.get("emailAddress", {}).get("address", "") for r in message.get("ccRecipients", [])]
 
             mailbox = "unknown"
             try:
