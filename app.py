@@ -2065,13 +2065,24 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
                     continue
 
                 info = items_info[code]
+                new_week_val = info['week']
+                new_date_str = confirmation_date # Assuming this is already formatted as needed
+                new_entry = f"{new_date_str} (Week {new_week_val})"
 
                 # --- Update week ---
-                current_week = orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"]
+                current_week_str = orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"]
 
-                if is_empty(current_week):
-                    orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = \
-                        f"{confirmation_date} (Week {info['week']})"
+                if is_empty(current_week_str):
+                    orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = new_entry
+                else:
+                    # Extract the digits after "(Week "
+                    match = re.search(r"\(Week (\d+)\)", str(current_week_str))
+                    existing_week = match.group(1) if match else None
+
+                    # If the week number is different, overwrite it
+                    if existing_week != str(new_week_val):
+                        orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = new_entry
+                        print(f"🔄 Updated {code}: Week {existing_week} -> {new_week_val}")
 
                 # --- Update quantity ---
                 if info["quantity"] is not None:
@@ -3222,7 +3233,8 @@ def webhook():
 
         for notification in notifications:
             resource = notification.get("resource", "")
-            message_url = f"{GRAPH_URL}/{resource}?$select=id,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,body"
+            # --- MODIFIED: Added 'hasAttachments' to the $select query ---
+            message_url = f"{GRAPH_URL}/{resource}?$select=id,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments"
 
             message_response = safe_request(
                 "get",
@@ -3231,29 +3243,25 @@ def webhook():
                 timeout=20
             )
 
-            # 2. Check for failure BEFORE parsing
             if message_response.status_code != 200:
                 error_text = message_response.text
-                
-                # 🔥 FIX: Catch the 404/ItemNotFound right here
                 if "ErrorItemNotFound" in error_text:
                     print("Message already moved or deleted, skipping...")
                 else:
                     print(f"❌ Error fetching message: {message_response.status_code} - {error_text}")
-                
-                continue # Skip to the next notification
+                continue 
 
-            # 3. If we got here, the status is 200, so parsing is safe
             message = message_response.json()
+
+            # --- NEW: Ignore messages with no attachments ---
+            if not message.get("hasAttachments", False):
+                print(f"📎 Skipping: Message '{message.get('subject')}' has no attachments.")
+                continue
 
             internet_id = message.get("internetMessageId")
 
             # --- Message fields ---
-            subject = message.get("subject")
-            if subject is None:
-                subject = ""
-            else:
-                subject = subject.strip()
+            subject = message.get("subject", "").strip() if message.get("subject") else ""
 
             sender_email = (
                 message.get("from", {})
@@ -3261,9 +3269,12 @@ def webhook():
                 .get("address", "")
                 .lower()
             )
+
+            # Reply/Forward logic
             if re.match(r'^\s*((RE|AW):\s*)+', subject, re.IGNORECASE) and not (sender_email.endswith("@atbwater.com") or sender_email.endswith("@pentair.com")):
                 print("↩️ Reply/forward ignored")
                 continue
+
             message_id = message.get("id")
             message_date = message.get("receivedDateTime")
 
@@ -3274,17 +3285,10 @@ def webhook():
                 print("↩️ Ignoring self-sent email")
                 continue
             
-            to_emails = [
-                r.get("emailAddress", {}).get("address", "")
-                for r in message.get("toRecipients", [])
-            ]
+            # (Rest of your processing logic remains the same...)
+            to_emails = [r.get("emailAddress", {}).get("address", "") for r in message.get("toRecipients", [])]
+            cc_emails = [r.get("emailAddress", {}).get("address", "") for r in message.get("ccRecipients", [])]
 
-            cc_emails = [
-                r.get("emailAddress", {}).get("address", "")
-                for r in message.get("ccRecipients", [])
-            ]
-
-            # --- Parse mailbox from resource ---
             mailbox = "unknown"
             try:
                 path_parts = resource.split("/")
@@ -3293,93 +3297,40 @@ def webhook():
             except Exception:
                 print(f"⚠️ Unexpected resource format: {resource}")
 
-            # --- Log message ---
-            print("📨 New message received")
+            print("📨 New message received (with attachments)")
             print(f"   Subject: {subject}")
-            print(f"   From: {sender_email}")
-            print(f"   To: {', '.join(to_emails) if to_emails else '—'}")
-            if cc_emails:
-                print(f"   CC: {', '.join(cc_emails)}")
             print("-" * 60)
-            # --- Extract message body text ---
-            body_content = ""
 
+            body_content = ""
             try:
-                body_content = (
-                    message.get("body", {})
-                    .get("content", "")
-                    .lower()
-                )
+                body_content = message.get("body", {}).get("content", "").lower()
             except Exception:
                 body_content = ""
+
             is_khrone = sender_email.endswith("@krohne.com")
             is_hach = sender_email.endswith("@hach.com")
             is_atb = sender_email.endswith("@atbwater.com")
             has_po_generic = re.search(r'PO-\d+', subject, re.IGNORECASE)
-            # 1️⃣ KHRONE readiness (single check)
+
+            # --- Submit to ThreadPool ---
             if is_khrone and "notification of readiness of goods:" in subject.lower():
-                print("✅ Khrone packing list → process_khrone_packing_list")
-                POOL.submit(
-                    process_khrone_packing_list,
-                    mailbox,
-                    message_id,
-                    message_date,
-                    internet_id
-                )
-
-            # 2️⃣ KHRONE O/A
+                print("✅ Khrone packing list")
+                POOL.submit(process_khrone_packing_list, mailbox, message_id, message_date, internet_id)
             elif is_khrone and (khrone_oa_pattern.search(subject) or khrone_oa_pattern.search(body_content)):
-                print("✅ Khrone O/A → process_khrone_message")
-                POOL.submit(
-                    process_khrone_message,
-                    mailbox,
-                    message_id,
-                    message_date,
-                    internet_id
-                )
-
-            # 3️⃣ HACH
+                print("✅ Khrone O/A")
+                POOL.submit(process_khrone_message, mailbox, message_id, message_date, internet_id)
             elif is_hach and subject:
-                is_greenlight = greenlight_pattern.search(subject)
-                has_po_hach = po_pattern.search(subject)
-
-                if is_greenlight:
-                    print("✅ Hach Greenlight → packing_list")
-                    POOL.submit(
-                        packing_list,
-                        mailbox,
-                        message_id,
-                        message_date,
-                        internet_id
-                    )
-
-                elif has_po_hach:
-                    print("✅ Hach PO confirmation → process_hach_message")
-                    POOL.submit(
-                        process_hach_message,
-                        mailbox,
-                        message_id,
-                        message_date,
-                        internet_id
-                    )
-
-                else:
-                    print("ℹ️ Hach mail ignored (no PO or Greenlight)")
-
-            # 4️⃣ Generic PO
+                if greenlight_pattern.search(subject):
+                    print("✅ Hach Greenlight")
+                    POOL.submit(packing_list, mailbox, message_id, message_date, internet_id)
+                elif po_pattern.search(subject):
+                    print("✅ Hach PO confirmation")
+                    POOL.submit(process_hach_message, mailbox, message_id, message_date, internet_id)
             elif has_po_generic or is_atb:
-                print("↪️ Generic PO mail → process_message")
-                POOL.submit(
-                    process_message,
-                    mailbox,
-                    message_id,
-                    message_date,
-                    internet_id
-                )
-
-            # 5️⃣ Ignore everything else
+                print("↪️ Generic PO mail")
+                POOL.submit(process_message, mailbox, message_id, message_date, internet_id)
             else:
-                print("ℹ️ Mail ignored (no PO or relevant pattern)")
+                print("ℹ️ Mail ignored (no relevant pattern matches)")
 
         return jsonify({"status": "accepted"}), 202
 
