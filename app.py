@@ -57,7 +57,7 @@ MAILBOXES_2 = [
     "info@vortex.ge",
     "teona@vortex.ge"
 ]
-WEBHOOK_URL = "https://supply-tracker-o7ro.onrender.com/webhook"
+WEBHOOK_URL = "https://supply-tracker-4crg.onrender.com/webhook"
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
 DB_PATH = os.environ.get("SQLITE_DB_PATH", "/tmp/processed.db")
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -3313,24 +3313,40 @@ def webhook():
             has_po_generic = re.search(r'PO-\d+', subject, re.IGNORECASE)
 
             # --- Submit to ThreadPool ---
+            is_processed = False  # Track if we actually sent this to a POOL task
+
+            # 1️⃣ KHRONE readiness
             if is_khrone and "notification of readiness of goods:" in subject.lower():
-                print("✅ Khrone packing list")
+                print("✅ Khrone packing list → process_khrone_packing_list")
                 POOL.submit(process_khrone_packing_list, mailbox, message_id, message_date, internet_id)
+                is_processed = True
+
+            # 2️⃣ KHRONE O/A
             elif is_khrone and (khrone_oa_pattern.search(subject) or khrone_oa_pattern.search(body_content)):
-                print("✅ Khrone O/A")
+                print("✅ Khrone O/A → process_khrone_message")
                 POOL.submit(process_khrone_message, mailbox, message_id, message_date, internet_id)
+                is_processed = True
+
+            # 3️⃣ HACH
             elif is_hach and subject:
                 if greenlight_pattern.search(subject):
-                    print("✅ Hach Greenlight")
+                    print("✅ Hach Greenlight → packing_list")
                     POOL.submit(packing_list, mailbox, message_id, message_date, internet_id)
+                    is_processed = True
                 elif po_pattern.search(subject):
-                    print("✅ Hach PO confirmation")
+                    print("✅ Hach PO confirmation → process_hach_message")
                     POOL.submit(process_hach_message, mailbox, message_id, message_date, internet_id)
+                    is_processed = True
+
+            # 4️⃣ Generic PO (Only if the pattern matches OR it's a specific internal request)
             elif has_po_generic or is_atb:
-                print("↪️ Generic PO mail")
+                print("↪️ Generic PO mail → process_message")
                 POOL.submit(process_message, mailbox, message_id, message_date, internet_id)
-            else:
-                print("ℹ️ Mail ignored (no relevant pattern matches)")
+                is_processed = True
+
+            # 5️⃣ CATCH-ALL: If none of the above were triggered
+            if not is_processed:
+                print(f"ℹ️ Mail ignored: '{subject}' (No PO or relevant pattern matches)")
 
         return jsonify({"status": "accepted"}), 202
 
