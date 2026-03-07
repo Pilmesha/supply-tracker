@@ -12,9 +12,7 @@ from collections import defaultdict
 import sqlite3
 from watcher import start_watcher
 load_dotenv()
-
 #======CONGIF=====
-
 # single session (reuse connections)
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "supply-tracker/1.0", "Content-Type": "application/x-www-form-urlencoded"})
@@ -69,7 +67,6 @@ CREATE TABLE IF NOT EXISTS processed_messages (
 )
 """)
 conn.commit()
-
 
 app = Flask(__name__)
 start_watcher()
@@ -625,6 +622,14 @@ def get_first_payment_date(invoice_id):
     except Exception as e:
         print(f"❌ Failed to get payment date for {invoice_id}: {e}")
         return None
+def should_update(current_val, new_date):
+    if pd.isna(current_val) or current_val == "":
+        return True
+    match = re.search(r"\((.*?)\)", str(current_val))
+    if match:
+        existing_date = match.group(1).strip()
+        return existing_date != str(new_date)
+    return True
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
@@ -1433,39 +1438,28 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
             target_df.loc[po_mask, "ჩამოსვლის თარიღი"] = date_value
             # --- Step 4: Order-preserving fill ---
             updated = 0
-
             for idx, row in target_df.iterrows():
                 for pr in pr_items:
-                    if (
-                        not pr["used"]
-                        and row["PO"] == pr["po"]
-                        and row["Item"] == pr["name"]
-                    ):
-                        current_qty = row.get("რეალურად გამოგზავნილი რაოდენობა")
-                        if current_qty in (None, ""):
-                            target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = pr["quantity"]
-                            pr["used"] = True
-                            updated += 1
-                            print(f"   ✔ {row['Item']} → {pr['quantity']}")
-                        else:
-                            print(f"   ℹ️ Skipped {row['Item']}, cell already has value {current_qty}")
-                        break
-
+                    # Match only if this PR item hasn't been applied yet
+                    if not pr["used"] and row["PO"] == pr["po"] and row["Item"] == pr["name"]:
+                        new_qty = pr["quantity"]
+                        # Direct update without checking if empty
+                        target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = new_qty
+                        print(f"   ✔ {row['Item']} → {new_qty}")
+                        pr["used"] = True
+                        updated += 1
+                        break  # Move to the next Excel row
             if updated == 0:
                 print("⚠️ No rows updated")
                 return
-
             print(f"✅ Updated {updated} rows in '{target_sheet}'")
-
             # --- Step 5: Write back to Excel ---
             for col_idx, col_name in enumerate(target_df.columns, start=1):
                 ws.cell(row=1, column=col_idx).value = col_name
 
-            for row_idx, row in enumerate(target_df.values.tolist(), start=2):
-                for col_idx, value in enumerate(row, start=1):
-                    cell = ws.cell(row=row_idx, column=col_idx)
-                    if cell.value in (None, ""):
-                        cell.value = value
+            for row_idx, row_values in enumerate(target_df.values.tolist(), start=2):
+                for col_idx, value in enumerate(row_values, start=1):
+                    ws.cell(row=row_idx, column=col_idx).value = value
 
             # --- Step 6: Save & upload ---
             output = io.BytesIO()
@@ -1781,25 +1775,19 @@ def process_hach_message(mailbox, message_id, message_date, internet_id):
             if not code or code not in code_week_map:
                 continue
             week_number = code_week_map[code]
-            current_val = row.get("Confirmation 1 (shipment week)")
             new_val = f"{confirmation_date.strftime('%d.%m.%Y')} (week {week_number})"
-            if is_empty(current_val):
+            current_val = str(row.get("Confirmation 1 (shipment week)", ""))
+
+            # Extract week from "(week 12/2026)" or similar
+            match = re.search(r"week\s*([\d/]+)", current_val, re.IGNORECASE)
+            existing_week = match.group(1) if match else None
+
+            # Overwrite if empty OR if the week in brackets is different
+            if is_empty(current_val) or existing_week != str(week_number):
                 df.at[idx, "Confirmation 1 (shipment week)"] = new_val
                 updated += 1
-            else:
-                # 2. Extract the week number from the existing string (e.g., "12.05.2024 (week 19)")
-                match = re.search(r"\(week (\d+)\)", str(current_val))
-                existing_week = match.group(1) if match else None
-
-                # 3. Update if the week number doesn't match
-                if existing_week != str(week_number):
-                    df.at[idx, "Confirmation 1 (shipment week)"] = new_val
-                    updated += 1
-                    print(f"✅ Updated week for code {code}: {existing_week} -> {week_number}")
-                else:
-                    print(f"ℹ️ Skipped: Week {week_number} is already correct for code {code}")
-
-            updated += 1
+                if not is_empty(current_val):
+                    print(f"✅ Overwrote code {code}: {existing_week} -> {week_number}")
 
         if updated == 0:
             print("⚠️ No codes from PDF matched table")
@@ -1851,13 +1839,17 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
         dt = message_date
     else:
         print(f"⚠️ Unexpected message_date type: {type(message_date)}")
+        conn.close()
         return
-    confirmation_date = dt.date()  # <-- DATE ONLY
+
+    confirmation_date = dt.date()
+
     # --- Download attachments ---
     att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
     att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
     if att_resp.status_code != 200:
         print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
+        conn.close()
         return
 
     attachments = att_resp.json().get("value", [])
@@ -1869,18 +1861,22 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
 
     if not pdf_attachments:
         print("⚠️ No matching SO_ PDF attachments found")
+        conn.close()
         return
+
     item_results_by_po = {}
     for att in pdf_attachments:
         print(f"📎 Processing attachment: {att['name']}")
         content = base64.b64decode(att['contentBytes'])
+        
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             pdf_text_pages = []
             for page in pdf.pages:
                 text = page.extract_text() or ""
                 text = re.sub(r'\s+', ' ', text)
                 pdf_text_pages.append(text)
-        # --- Extract PO from THIS PDF ---
+
+        # --- Extract PO from PDF ---
         po_number = None
         for page_text in pdf_text_pages:
             po_match = re.search(r"PO-\d+", page_text)
@@ -1891,41 +1887,36 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
         if not po_number:
             print(f"❌ PO number not found in {att['name']}, skipping")
             continue
+
         print(f"🎯 Found PO: {po_number}")
-        # --- Extract items for THIS PDF ---
+
+        # --- Extract items (Week only) ---
         item_week_pattern = re.compile(r'([A-Z0-9]{10,})\s*Week\s*(\d{1,2}/\d{4})', re.IGNORECASE)
-        quantity_pattern = re.compile(r'(\d+)\s*pcs', re.IGNORECASE)
         items_info = {}
         for page_text in pdf_text_pages:
-            page_text = re.sub(r'\s+', ' ', page_text)
             for match in item_week_pattern.finditer(page_text):
                 code = match.group(1)
                 week = match.group(2)
-                start_pos = max(match.start() - 100, 0)
-                qty_search = page_text[start_pos:match.start()]
-                qty_matches = list(quantity_pattern.finditer(qty_search))
-                quantity = int(qty_matches[-1].group(1)) if qty_matches else None
-                items_info[code] = {
-                    "week": week,
-                    "quantity": quantity
-                }
+                # Storing only the week now
+                items_info[code] = {"week": week}
+        
         item_results_by_po[po_number] = items_info
-    print(item_results_by_po)   
-    if not items_info:
+
+    if not item_results_by_po:
         print("⚠️ No item codes found in PDFs")
         conn.close()
         return
-    # --- Update Excel only for rows with this PO ---
+
+    # --- Update Excel ---
     with EXCEL_LOCK:
         file_stream = None
         wb = None
-        orders_df = pd.DataFrame()
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+        
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
-                # --- Download orders file ---
                 resp = HTTP.get(url_download, headers=headers, timeout=60)
                 resp.raise_for_status()
                 file_stream = io.BytesIO(resp.content)
@@ -1934,91 +1925,73 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
                 if "მიმდინარე " in wb.sheetnames:
                     ws = wb["მიმდინარე "]
                     orders_df = pd.DataFrame(ws.values)
-                    orders_df.columns = orders_df.iloc[0]  # first row as header
+                    orders_df.columns = orders_df.iloc[0]
                     orders_df = orders_df[1:].reset_index(drop=True)
-                    orders_df["_excel_row"] = range(2, 2 + len(orders_df))  # Excel rows start at 2
+                    orders_df["_excel_row"] = range(2, 2 + len(orders_df))
                 else:
-                    print("⚠️ Worksheet 'მიმდინარე ' not found in orders file.")
-                    orders_df = pd.DataFrame()
-                break  # success — exit retry loop
+                    print("⚠️ Worksheet 'მიმდინარე ' not found.")
+                    conn.close()
+                    return
+                break
             except Exception as e:
                 wait = min(5 * (attempt + 1), 30)
-                print(f"⚠️ Error downloading main file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
+                print(f"⚠️ Download error (attempt {attempt+1}): {e}. Sleeping {wait}s")
                 time.sleep(wait)
         else:
-            print("❌ Gave up downloading files after multiple attempts")
+            print("❌ Failed to download file.")
+            conn.close()
             return
         updated_rows = 0
-        for po_number, items_info in item_results_by_po.items():
-            po_rows = orders_df[orders_df["PO"] == po_number]
-            if po_rows.empty:
-                print(f"⚠️ No Excel rows found for PO {po_number}")
-                continue
+        for po_num, info_map in item_results_by_po.items():
+            po_rows = orders_df[orders_df["PO"] == po_num]
             for i, row in po_rows.iterrows():
                 code = str(row["Code"]).strip()
-                if code not in items_info:
-                    print(f"⚠️ Code {code} not found in PDF for PO {po_number}")
+                if code not in info_map:
                     continue
-                info = items_info[code]
-                new_week_val = info['week']
-                new_date_str = confirmation_date # Assuming this is already formatted as needed
-                new_entry = f"{new_date_str} (Week {new_week_val})"
-                # --- Update week ---
-                current_week_str = orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"]
-                if is_empty(current_week_str):
+                new_week_val = info_map[code]['week']
+                new_entry = f"{confirmation_date.strftime('%d.%m.%Y')} (Week {new_week_val})"
+                current_val = str(orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] or "")
+
+                # Extract existing week from bracket
+                match = re.search(r"Week\s*([\d/]+)", current_val, re.IGNORECASE)
+                existing_week = match.group(1) if match else None
+
+                # Overwrite if empty OR week changed
+                if is_empty(current_val) or existing_week != str(new_week_val):
                     orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = new_entry
-                else:
-                    # Extract the digits after "(Week "
-                    match = re.search(r"\(Week (\d+)\)", str(current_week_str))
-                    existing_week = match.group(1) if match else None
-                    # If the week number is different, overwrite it
-                    if existing_week != str(new_week_val):
-                        orders_df.at[i, "Confirmation-ის მოსვლის თარიღი"] = new_entry
-                        print(f"🔄 Updated {code}: Week {existing_week} -> {new_week_val}")
-                # --- Update quantity ---
-                if info["quantity"] is not None:
-                    orders_df.at[i, "რეალურად გამოგზავნილი რაოდენობა"] = info["quantity"]
-                updated_rows += 1
-                print(f"✅ Updated PO {po_number} | Code {code}")
-        if updated_rows == 0:
-            print("⚠️ No rows were updated")
-            conn.close()
-        for i, row in orders_df.iterrows():
-            excel_row = row["_excel_row"]
-            for col_idx, col_name in enumerate(orders_df.columns, start=1):
-                if col_name == "_excel_row":
+                    updated_rows += 1
+                    print(f"✅ Updated {code} for PO {po_num}: {existing_week} -> {new_week_val}")
+
+        if updated_rows > 0:
+            # Apply changes back to worksheet object
+            for i, row in orders_df.iterrows():
+                excel_row = row["_excel_row"]
+                for col_idx, col_name in enumerate(orders_df.columns, start=1):
+                    if col_name == "_excel_row": continue
+                    ws.cell(row=excel_row, column=col_idx).value = row[col_name]
+
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            # Upload
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            for attempt in range(10):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                if resp.status_code in (423, 409):
+                    time.sleep(min(30, 2**attempt))
                     continue
-                ws.cell(row=excel_row, column=col_idx).value = row[col_name]
-                if col_name == "Confirmation-ის მოსვლის თარიღი" and row[col_name]:
-                    ws.cell(row=excel_row, column=col_idx).number_format = "DD/MM/YYYY"
-    # Save workbook to memory
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
+                resp.raise_for_status()
+                break
+            
+            cursor.execute("INSERT INTO processed_messages (internet_id) VALUES (?)", (internet_id,))
+            conn.commit()
+            print(f"✅ Processed {updated_rows} rows successfully.")
+        else:
+            print("⚠️ No changes needed.")
 
-    # Upload back
-    url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-    max_attempts = 10
-    for attempt in range(max_attempts):
-        resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-        if resp.status_code in (423, 409):  # Locked
-            wait_time = min(30, 2**attempt) + random.uniform(0, 2)
-            print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-            time.sleep(wait_time)
-            continue
-        resp.raise_for_status()
-        cursor.execute("INSERT INTO processed_messages (internet_id) VALUES (?)", (internet_id,))
-        conn.commit()
-        conn.close()
-        range_address = get_used_range("მიმდინარე ")
-        table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
-        print(f"✅ Upload successful. Created table named {table_name}")
-        file_stream.close()
-        file_stream = wb = None
-        del orders_df
-        gc.collect()
-        return
-
+    conn.close()
+    gc.collect()
 
 def process_pentair_message(mailbox, message_id, message_date, internet_id):
     conn = sqlite3.connect(DB_PATH)
@@ -2139,23 +2112,19 @@ def process_pentair_message(mailbox, message_id, message_date, internet_id):
 
             for idx in matching_idx:
                 code = str(orders_df.at[idx, "Code"]).strip()
-                
-                # Check if this specific item code is mentioned in this specific PDF
                 if code in full_text:
-                    try:
-                        dt_obj = datetime.strptime(global_date, "%d.%m.%Y")
-                        formatted_delivery = dt_obj.strftime("%d.%m.%Y")
-                        new_entry = f"{confirmation_date.strftime('%d.%m.%Y')} ({formatted_delivery})"
-                    except:
-                        new_entry = f"{confirmation_date.strftime('%d.%m.%Y')} ({global_date})"
+                    new_entry = f"{confirmation_date.strftime('%d.%m.%Y')} ({global_date})"
+                    current_val = str(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] or "")
 
-                    current_val = str(orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"])
+                    # Extract existing date from brackets (e.g., "(12.05.2026)")
+                    match = re.search(r"\(([\d\.]+)\)", current_val)
+                    existing_bracket_date = match.group(1) if match else None
 
-                    # Update if empty or date changed
-                    if is_empty(current_val) or f"({global_date})" not in current_val:
+                    # Overwrite if empty OR the bracketed date is different
+                    if is_empty(current_val) or existing_bracket_date != global_date:
                         orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = new_entry
                         updated_rows += 1
-                        print(f"✅ Matched {code} to PO {po_number} with date {global_date}")
+                        print(f"✅ Updated {code} for PO {po_number}: {existing_bracket_date} -> {global_date}")
         if updated_rows == 0:
             print("⚠️ No matching item codes found in any confirmation PDFs.")
             conn.close()
@@ -2207,262 +2176,278 @@ def process_pentair_message(mailbox, message_id, message_date, internet_id):
 
 def process_atb_message(mailbox, message_id, message_date, internet_id):
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
-    if cursor.fetchone():
-        print(f"⚠️ Already processed {internet_id}, skipping.")
-        conn.close()
-        return
-    print(f"Mailbox: {mailbox}")
-    print(f"message_id: {message_id}")
-    print(f"message_date: {message_date}")
-    
-    att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
-    att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
-    
-    if att_resp.status_code != 200:
-        print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
-        return
-
-    attachments = att_resp.json().get("value", [])
-    po_data_map = {}
-    delivery_code_map = {}
-    
-    pdf_attachments = [
-        att for att in attachments
-        if att.get("name", "").lower().endswith(".pdf")
-        or att.get("contentType") == "application/pdf"
-    ]
-    
-    if not pdf_attachments:
-        print("ℹ️ No PDF attachments found")
-        conn.close()
-        return
-    
-    for att in pdf_attachments:
-        if "contentBytes" not in att:
-            print(f"❌ Attachment {att.get('name')} has no contentBytes")
-            continue
-            
-        print(f"📎 Processing PDF: {att.get('name')}")
-        content = base64.b64decode(att["contentBytes"])
-        all_text = ""
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
+        if cursor.fetchone():
+            print(f"⚠️ Already processed {internet_id}")
+            return
+        print(f"Mailbox: {mailbox}")
+        print(f"message_id: {message_id}")
+        print(f"message_date: {message_date}")
         
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            first_page_text = (pdf.pages[0].extract_text() or "").lower()   
-            if "confirmation" not in first_page_text:
-                print("⚠️ Not a confirmation document → skipping")
-                continue      
+        att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+        att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
+        
+        if att_resp.status_code != 200:
+            print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
+            return
+
+        attachments = att_resp.json().get("value", [])
+        po_data_map = {}
+        delivery_code_map = {}
+        
+        pdf_attachments = [
+            att for att in attachments
+            if att.get("name", "").lower().endswith(".pdf")
+            or att.get("contentType") == "application/pdf"
+        ]
+        
+        if not pdf_attachments:
+            print("ℹ️ No PDF attachments found")
+            return
+        
+        for att in pdf_attachments:
+            if "contentBytes" not in att:
+                print(f"❌ Attachment {att.get('name')} has no contentBytes")
+                continue
+                
+            print(f"📎 Processing PDF: {att.get('name')}")
+            content = base64.b64decode(att["contentBytes"])
             all_text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text() or ""
-                all_text += page_text + "\n"
-        
-        # --- Detect PO ---
-        po_patterns = [r"PO[-:\s]*(\d+)",r"P\.?O\.?[-:\s]*(\d+)",r"Purchase\s+Order[-:\s]*(\d+)",r"Order\s+Number[-:\s]*(\d+)",r"#\s*(\d+)"]
-        po_number = None
-        for pattern in po_patterns:
-            po_match = re.search(pattern, all_text, re.IGNORECASE)
-            if po_match:
-                # If pattern includes capture group for just the number
-                if po_match.groups():
-                    po_number = f"PO-{po_match.group(1)}"
-                else:
-                    po_number = po_match.group(0)
-                print(f"✅ Found PO with pattern '{pattern}': {po_number}")
-                break
-        
-        if not po_number:
-            print("⚠️ No PO number found in text")
-            conn.close()
-        # --- Extract dates with multiple patterns ---
-        termen_date = None
-        termen_patterns = [r"Termen\s*:?\s*(\d{2}/\d{2}/\d{4})",r"Termen\s*:?\s*(\d{2}\.\d{2}\.\d{4})",r"Termen\s*:?\s*(\d{2}-\d{2}-\d{4})"]
-        for pattern in termen_patterns:
-            match = re.search(pattern, all_text, re.IGNORECASE)
-            if match:
-                termen_date = match.group(1).replace('.', '/').replace('-', '/')
-                break
-        delivery_date = None
-        delivery_patterns = [r"Delivery\s*date\s*:?\s*(\d{2}/\d{2}/\d{2,4})",r"Delivery\s*:?\s*(\d{2}/\d{2}/\d{2,4})"]
-        
-        for pattern in delivery_patterns:
-            match = re.search(pattern, all_text, re.IGNORECASE)
-            if match:
-                delivery_date = match.group(1)
-                print(f"✅ Found delivery date: {delivery_date}")
-                break
-
-        if po_number:
-            bracket_date = termen_date if termen_date else delivery_date
-            po_data_map[po_number] = {
-                "text": all_text,
-                "date": bracket_date
-            }
-            print(f"🎯 Found PO {po_number} | Date: {bracket_date}")
             
-        elif delivery_date:
-            print("📦 Delivery confirmation without PO detected")
-            code_patterns = [r'\b\d{8}\b',r'\b\d[A-Z]\d{4}\b',r'\b[A-Z0-9]{6}\b']
-            all_codes = []
-            for pattern in code_patterns:
-                codes = re.findall(pattern, all_text, re.IGNORECASE)
-                all_codes.extend(codes)
-            # Now match with delivery dates
-            for code in all_codes:
-                # Try to find date near the code
-                context_pattern = rf"{re.escape(code)}.*?Delivery\s*date\s*:?\s*(\d{{2}}/\d{{2}}/\d{{2,4}})"
-                date_match = re.search(context_pattern, all_text, re.IGNORECASE | re.S)
-                if date_match:
-                    ddate = date_match.group(1)
-                    delivery_code_map[code.strip()] = ddate
-                else:
-                    # If no specific date near code, use the overall delivery date
-                    delivery_code_map[code.strip()] = delivery_date
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                first_page_text = (pdf.pages[0].extract_text() or "").lower()   
+                if "confirmation" not in first_page_text:
+                    print("⚠️ Not a confirmation document → skipping")
+                    continue      
+                all_text = ""
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    all_text += page_text + "\n"
             
-            print(f"Found {len(delivery_code_map)} delivery codes")
-        else:
-            print(f"⚠️ No usable confirmation data in {att.get('name')}")
-
-    # --- convert message date ---
-    if isinstance(message_date, str):
-        dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
-    elif isinstance(message_date, datetime):
-        dt = message_date
-    else:
-        print(f"⚠️ Unexpected message_date type: {type(message_date)}")
-        return
-        
-    confirmation_date = dt.strftime("%d/%m/%Y")
-    with EXCEL_LOCK:
-        file_stream = None
-        wb = None
-        orders_df = pd.DataFrame()
-        url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-        # --- Download Excel ---
-        max_attempts = 6
-        for attempt in range(max_attempts):
-            try:
-                resp = HTTP.get(url_download, headers=headers, timeout=60)
-                resp.raise_for_status()
-                file_stream = io.BytesIO(resp.content)
-                wb = load_workbook(file_stream)
-                if "მიმდინარე " in wb.sheetnames:
-                    ws = wb["მიმდინარე "]
-                    orders_df = pd.DataFrame(ws.values)
-                    orders_df.columns = orders_df.iloc[0]
-                    orders_df = orders_df[1:]
-                else:
-                    print("⚠️ Worksheet not found")
-                    return
-                break
-            except Exception as e:
-
-                wait = min(5 * (attempt + 1), 30)
-                print(f"⚠️ Download error {attempt+1}/{max_attempts}: {e}")
-                time.sleep(wait)
-        else:
-            print("❌ Could not download Excel")
-            return
-        updated_rows = 0
-        # =====================================================
-        # PO CONFIRMATION VERSION
-        # =====================================================
-        for po_number, po_data in po_data_map.items():
-            all_text = po_data["text"]
-            termen_date = po_data["date"]
-            print(f"\n🔄 Updating Excel for PO {po_number}")
-
-            matching_idx = orders_df.index[orders_df["PO"] == po_number]
-            if len(matching_idx) == 0:
-                print(f"⚠️ No rows found for PO {po_number}")
-                conn.close()
-                continue
-            # =====================================================
-            # CASE 1: PO + Termen but NO delivery date → update ALL PO rows
-            # =====================================================
-            if termen_date and not delivery_code_map:
-                print("📌 Termen found and no delivery mapping → updating all PO rows")
-                for idx in matching_idx:
-                    current_val = orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]
-                    if pd.isna(current_val) or current_val == "":
-                        value = f"{confirmation_date} ({termen_date})"
-                        orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = value
-                        updated_rows += 1
-                        print(f"✅ Updated PO row {po_number}")
-                    # =====================================================
-                    # CASE 2: PO + Delivery date exists → match codes
-                    # =====================================================
+            # --- Detect PO ---
+            po_patterns = [r"PO[-:\s]*(\d+)",r"P\.?O\.?[-:\s]*(\d+)",r"Purchase\s+Order[-:\s]*(\d+)",r"Order\s+Number[-:\s]*(\d+)",r"#\s*(\d+)"]
+            po_number = None
+            for pattern in po_patterns:
+                po_match = re.search(pattern, all_text, re.IGNORECASE)
+                if po_match:
+                    # If pattern includes capture group for just the number
+                    if po_match.groups():
+                        po_number = f"PO-{po_match.group(1)}"
                     else:
-                        for idx in matching_idx:
-                            code = orders_df.at[idx, "Code"]
-                            if code and code in all_text:
-                                current_val = orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]
-                                bracket_date = po_data["date"]
-                                if pd.isna(current_val) or current_val == "":
-                                    if bracket_date:
-                                        value = f"{confirmation_date} ({bracket_date})"
-                                    else:
-                                        value = confirmation_date
-                                    orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = value
-                                    updated_rows += 1
-                                    print(f"✅ Code {code} updated")
-        # =====================================================
-        # DELIVERY DATE VERSION
-        # =====================================================
-        if delivery_code_map:
-            print("\n📦 Processing delivery-date confirmation")
+                        po_number = po_match.group(0)
+                    print(f"✅ Found PO with pattern '{pattern}': {po_number}")
+                    break
+            
+            if not po_number:
+                print("⚠️ No PO number found in text")
+            # --- Extract dates with multiple patterns ---
+            termen_date = None
+            termen_patterns = [r"Termen\s*:?\s*(\d{2}/\d{2}/\d{4})",r"Termen\s*:?\s*(\d{2}\.\d{2}\.\d{4})",r"Termen\s*:?\s*(\d{2}-\d{2}-\d{4})"]
+            for pattern in termen_patterns:
+                match = re.search(pattern, all_text, re.IGNORECASE)
+                if match:
+                    termen_date = match.group(1).replace('.', '/').replace('-', '/')
+                    break
+            delivery_date = None
+            delivery_patterns = [r"Delivery\s*date\s*:?\s*(\d{2}/\d{2}/\d{2,4})",r"Delivery\s*:?\s*(\d{2}/\d{2}/\d{2,4})"]
+            
+            for pattern in delivery_patterns:
+                match = re.search(pattern, all_text, re.IGNORECASE)
+                if match:
+                    delivery_date = match.group(1)
+                    print(f"✅ Found delivery date: {delivery_date}")
+                    break
 
-            matching_rows = orders_df[
-                (orders_df["Supplier Company"] == "ATB Water") &
-                (orders_df["Confirmation-ის მოსვლის თარიღი"].isna())
-            ]
-            for idx in matching_rows.index:
-                code = str(orders_df.at[idx, "Code"]).strip()
-                if code in delivery_code_map:
-                    delivery_date = delivery_code_map[code]
-                    value = f"{confirmation_date} ({delivery_date})"
-                    orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = value
-                    updated_rows += 1
-                    print(f"✅ Code {code} delivery {delivery_date}")
-        if updated_rows == 0:
-            print("⚠️ No rows updated")
-            conn.close()
-            return
-        # --- Write dataframe back to Excel ---
-        ws = wb["მიმდინარე "]
+            if po_number:
+                bracket_date = termen_date or delivery_date
+                po_data_map[po_number] = {
+                    "text": all_text,
+                    "date": bracket_date
+                }
+                print(f"🎯 Found PO {po_number} | Date: {bracket_date}")
+                
+            elif delivery_date:
+                print("📦 Delivery confirmation without PO detected")
+                code_patterns = [r'\b\d{8}\b',r'\b\d[A-Z]\d{4}\b',r'\b[A-Z0-9]{6}\b']
+                all_codes = []
+                for pattern in code_patterns:
+                    codes = re.findall(pattern, all_text, re.IGNORECASE)
+                    all_codes.extend(codes)
+                # Now match with delivery dates
+                for code in all_codes:
+                    # Try to find date near the code
+                    context_pattern = rf"{re.escape(code)}.*?Delivery\s*date\s*:?\s*(\d{{2}}/\d{{2}}/\d{{2,4}})"
+                    date_match = re.search(context_pattern, all_text, re.IGNORECASE | re.S)
+                    if date_match:
+                        ddate = date_match.group(1)
+                        delivery_code_map[code.strip()] = ddate
+                    else:
+                        # If no specific date near code, use the overall delivery date
+                        delivery_code_map[code.strip()] = delivery_date
+                
+                print(f"Found {len(delivery_code_map)} delivery codes")
+            else:
+                print(f"⚠️ No usable confirmation data in {att.get('name')}")
 
-        for col_idx, col_name in enumerate(orders_df.columns.tolist(), start=1):
-            ws.cell(row=1, column=col_idx).value = col_name
-        for row_idx, row in enumerate(orders_df.values.tolist(), start=2):
-            for col_idx, value in enumerate(row, start=1):
-                ws.cell(row=row_idx, column=col_idx).value = value
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        # --- Upload Excel ---
-        url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        max_attempts = 10
-        for attempt in range(max_attempts):
-            resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-            if resp.status_code in (423, 409):
-                wait_time = min(30, 2**attempt) + random.uniform(0, 2)
-                print(f"⚠️ File locked. Retry in {wait_time:.1f}s")
-                time.sleep(wait_time)
-                continue
-            resp.raise_for_status()
-            cursor.execute("INSERT INTO processed_messages (internet_id) VALUES (?)", (internet_id,))
-            conn.commit()
-            conn.close()
-            range_address = get_used_range("მიმდინარე ")
-            table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
-            print(f"✅ Upload successful. Table: {table_name}")
-            file_stream.close()
-            file_stream = wb = None
-            del orders_df
-            gc.collect()
+        # --- convert message date ---
+        if isinstance(message_date, str):
+            dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+        elif isinstance(message_date, datetime):
+            dt = message_date
+        else:
+            print(f"⚠️ Unexpected message_date type: {type(message_date)}")
             return
+            
+        confirmation_date = dt.strftime("%d/%m/%Y")
+        with EXCEL_LOCK:
+            file_stream = None
+            wb = None
+            orders_df = pd.DataFrame()
+            url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
+            # --- Download Excel ---
+            max_attempts = 6
+            for attempt in range(max_attempts):
+                try:
+                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp.raise_for_status()
+                    file_stream = io.BytesIO(resp.content)
+                    wb = load_workbook(file_stream)
+                    if "მიმდინარე " in wb.sheetnames:
+                        ws = wb["მიმდინარე "]
+                        orders_df = pd.DataFrame(ws.values)
+                        orders_df.columns = orders_df.iloc[0]
+                        orders_df = orders_df[1:]
+                    else:
+                        print("⚠️ Worksheet not found")
+                        return
+                    break
+                except Exception as e:
+
+                    wait = min(5 * (attempt + 1), 30)
+                    print(f"⚠️ Download error {attempt+1}/{max_attempts}: {e}")
+                    time.sleep(wait)
+            else:
+                print("❌ Could not download Excel")
+                return
+            updated_rows = 0
+            # =====================================================
+            # PO CONFIRMATION VERSION
+            # =====================================================
+            for po_number, po_data in po_data_map.items():
+                all_text = po_data["text"]
+                termen_date = po_data["date"]
+                print(f"\n🔄 Updating Excel for PO {po_number}")
+
+                matching_idx = orders_df.index[orders_df["PO"] == po_number]
+                if len(matching_idx) == 0:
+                    print(f"⚠️ No rows found for PO {po_number}")
+                    continue
+                # =====================================================
+                # CASE 1: PO + Termen but NO delivery date → update ALL PO rows
+                # =====================================================
+                if termen_date and not delivery_code_map:
+                    print("📌 Termen found and no delivery mapping → updating all PO rows")
+                    for idx in matching_idx:
+                        current_val = orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]
+                        if should_update(current_val, termen_date):
+                            value = f"{confirmation_date} ({termen_date})"
+                            orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = value
+                            updated_rows += 1
+                            print(f"✅ Updated PO row {po_number}")
+                # =====================================================
+                # CASE 2: PO + Delivery date exists → match codes
+                # =====================================================
+                else:
+                    for idx in matching_idx:
+                        code = str(orders_df.at[idx, "Code"]).strip()
+                        if code and code in all_text:
+                            current_val = orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]
+                            
+                            new_date = po_data["date"]
+                            if should_update(current_val, new_date):
+                                # Fallback logic: if no specific PDF date, just use email date
+                                if po_data["date"]:
+                                    value = f"{confirmation_date} ({po_data['date']})"
+                                else:
+                                    value = confirmation_date
+                                
+                                orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = value
+                                updated_rows += 1
+            # =====================================================
+            # DELIVERY DATE VERSION
+            # =====================================================
+            if delivery_code_map:
+                print("\n📦 Processing delivery-date confirmation")
+
+                matching_rows = orders_df[(orders_df["Supplier Company"] == "ATB Water")]
+
+                for idx in matching_rows.index:
+                    current_val = orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"]
+
+                    code = str(orders_df.at[idx, "Code"]).strip()
+                    if code in delivery_code_map:
+                        delivery_date = delivery_code_map[code]
+
+                        update_needed = False
+
+                        if pd.isna(current_val) or current_val == "":
+                            update_needed = True
+                        else:
+                            match = re.search(r"\((.*?)\)", str(current_val))
+                            if match:
+                                existing_date = match.group(1).strip()
+                                if existing_date != str(delivery_date):
+                                    update_needed = True
+                            else:
+                                update_needed = True
+
+                        if update_needed:
+                            value = f"{confirmation_date} ({delivery_date})"
+                            orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = value
+                            updated_rows += 1
+                            print(f"✅ Code {code} delivery {delivery_date}")
+            if updated_rows == 0:
+                print("⚠️ No rows updated")
+                return
+            # --- Write dataframe back to Excel ---
+            ws = wb["მიმდინარე "]
+
+            for col_idx, col_name in enumerate(orders_df.columns.tolist(), start=1):
+                ws.cell(row=1, column=col_idx).value = col_name
+            for row_idx, row in enumerate(orders_df.values.tolist(), start=2):
+                for col_idx, value in enumerate(row, start=1):
+                    ws.cell(row=row_idx, column=col_idx).value = value
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+            # --- Upload Excel ---
+            url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                if resp.status_code in (423, 409):
+                    wait_time = min(30, 2**attempt) + random.uniform(0, 2)
+                    print(f"⚠️ File locked. Retry in {wait_time:.1f}s")
+                    time.sleep(wait_time)
+                    continue
+                resp.raise_for_status()
+                cursor.execute("INSERT INTO processed_messages (internet_id) VALUES (?)", (internet_id,))
+                conn.commit()
+                range_address = get_used_range("მიმდინარე ")
+                table_name = create_table_if_not_exists(range_address, "მიმდინარე ")
+                print(f"✅ Upload successful. Table: {table_name}")
+                file_stream.close()
+                file_stream = wb = None
+                del orders_df
+    except Exception as e:
+        print(f"❌ Critical Error: {e}")
+    finally:
+        conn.close() # Guaranteed closure
+        del wb
+        gc.collect() # Trigger memory cleanup
 
 def packing_list(mailbox, message_id, message_date, internet_id):
     conn = sqlite3.connect(DB_PATH)
@@ -2663,18 +2648,16 @@ def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
         print(f"⚠️ Already processed {internet_id}, skipping.")
         conn.close()
         return
-    print(f"Mailbox: {mailbox}")
-    print(f"message_id: {message_id}")
-    print(f"message_date: {message_date}")
 
+    # --- Date Parsing ---
     if isinstance(message_date, str):
         dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
     elif isinstance(message_date, datetime):
         dt = message_date
     else:
         print(f"⚠️ Unexpected message_date type: {type(message_date)}")
+        conn.close()
         return
-
     confirmation_date = dt.date()
 
     with EXCEL_LOCK:
@@ -2697,55 +2680,42 @@ def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
                 if "მიმდინარე " in wb.sheetnames:
                     ws = wb["მიმდინარე "]
                     orders_df = pd.DataFrame(ws.values)
-                    orders_df.columns = orders_df.iloc[0]  # first row as header
-                    orders_df = orders_df[1:]              # drop header row
+                    orders_df.columns = orders_df.iloc[0]
+                    orders_df = orders_df[1:].reset_index(drop=True)
                 else:
-                    print("⚠️ Worksheet 'მიმდინარე ' not found in orders file.")
-                    orders_df = pd.DataFrame()
+                    print("⚠️ Worksheet 'მიმდინარე ' not found.")
+                    conn.close()
+                    return
                 break
             except Exception as e:
                 wait = min(5 * (attempt + 1), 30)
-                print(f"⚠️ Error downloading main file (attempt {attempt+1}/{max_attempts}): {e}. Sleeping {wait}s")
                 time.sleep(wait)
         else:
-            print("❌ Gave up downloading orders file after multiple attempts")
+            print("❌ Failed to download file.")
+            conn.close()
             return
 
         # --- Step 2: Get email attachments ---
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
         att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
         if att_resp.status_code != 200:
-            print(f"❌ Error fetching attachments: {att_resp.status_code} - {att_resp.text}")
+            conn.close()
             return
 
         attachments = att_resp.json().get("value", [])
-
-        # --- Step 3: Collect ALL Khrone packing list PDFs ---
-        packing_pdfs = []
-
-        for att in attachments:
-            name = att.get("name", "")
-            if (
-                name.lower().endswith(".pdf")
-                and re.search(r"\d{3}-\d{6}.*(copy\s*packing\s*list|plc)", name, re.IGNORECASE)
-                and "contentBytes" in att
-            ):
-                packing_pdfs.append(att)
+        packing_pdfs = [
+            att for att in attachments
+            if att.get("name", "").lower().endswith(".pdf")
+            and re.search(r"\d{3}-\d{6}.*(copy\s*packing\s*list|plc)", att.get("name", ""), re.IGNORECASE)
+        ]
 
         if not packing_pdfs:
             print("⚠️ No Khrone packing list PDFs found")
             conn.close()
             return
 
-        # --- Extract PO → items mapping ---
-        po_items_map = {}
-
-        def parse_quantity(qty_str):
-            try:
-                return int(float(qty_str.replace(",", ".")))
-            except:
-                return None
-
+        # --- Step 3: Extract PO and Codes ---
+        updated_rows = 0
         for pdf_att in packing_pdfs:
             print(f"📎 Processing packing list: {pdf_att.get('name')}")
             pdf_bytes = base64.b64decode(pdf_att["contentBytes"])
@@ -2754,115 +2724,68 @@ def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 for page in pdf.pages:
                     all_text += (page.extract_text() or "") + "\n"
+            
+            all_text = re.sub(r'\s+', ' ', all_text)
 
-            # --- Extract PO number ---
+            # Extract PO number
             po_match = re.search(r"Your Order\s*:?\s*(PO-\d+)", all_text)
-            po_number = po_match.group(1) if po_match else None
-
-            if not po_number:
+            if not po_match:
                 print("⚠️ PO number not found in this PDF")
                 continue
+            
+            po_number = po_match.group(1)
             print(f"🎯 Found PO: {po_number}")
 
-            pdf_lines = [line.strip() for line in all_text.splitlines() if line.strip()]
-            items = []
-            # Only check codes belonging to this PO
-            po_codes = orders_df.loc[orders_df["PO"] == po_number, "Code"]
-            for code in po_codes:
-                found = False
+            # Identify which codes from this PO exist in the PDF text
+            po_mask = orders_df["PO"] == po_number
+            codes_for_this_po = orders_df.loc[po_mask, "Code"].unique()
 
-                for i, line in enumerate(pdf_lines):
-                    if re.search(rf"\b{re.escape(str(code))}\b", line):
-
-                        # Look 1–3 lines above
-                        for j in range(1, 4):
-                            if i - j < 0:
-                                continue
-
-                            qty_line = pdf_lines[i - j]
-                            qty_match = re.search(r"(\d+,\d+)", qty_line)
-
-                            if qty_match:
-                                qty = parse_quantity(qty_match.group(1))
-                                if qty is not None:
-                                    items.append({"Code": code, "Quantity": qty})
-                                    print(f"✅ Matched code {code} with quantity {qty}")
-                                    found = True
-                                    break
-                        if not found:
-                            print(f"⚠️ Quantity not found near code {code}")
-                        break
-                if not found:
-                    print(f"⚠️ Code {code} not found in PDF")
-            if items:
-                po_items_map[po_number] = items
-        updated_rows = 0
-
-        for po_number, items in po_items_map.items():
-            print(f"\n🔄 Updating Excel for PO {po_number}")
-            for item in items:
-                code = item["Code"]
-                qty = item["Quantity"]
-                mask = (orders_df["PO"] == po_number) & (orders_df["Code"] == code)
-                if mask.any():
-                    for idx in orders_df.index[mask]:
-                        # Update quantity
-                        orders_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = qty
-
-                        # Update ready date (overwrite logic same as before)
+            for code in codes_for_this_po:
+                # If the item code is mentioned anywhere in the PDF text
+                if str(code).strip() in all_text:
+                    code_mask = po_mask & (orders_df["Code"] == code)
+                    
+                    for idx in orders_df.index[code_mask]:
                         current_val = orders_df.at[idx, "ტვირთი მზადაა ასაღებად"]
-
-                        if pd.isna(current_val) or current_val == "":
+                        # Fill only if empty
+                        if pd.isna(current_val) or str(current_val).strip() == "":
                             orders_df.at[idx, "ტვირთი მზადაა ასაღებად"] = confirmation_date
-
-                        updated_rows += 1
-                        print(f"✅ Updated code {code} for PO {po_number}")
-
-                else:
-                    print(f"⚠️ Code {code} not found in Excel for PO {po_number}")
+                            updated_rows += 1
+                            print(f"✅ Marked Code {code} as Ready")
 
         if updated_rows == 0:
-            print("⚠️ No rows updated from packing lists")
+            print("⚠️ No rows updated")
+            conn.close()
+            return
 
-        # --- Step 6: Save back to Excel and upload ---
+        # --- Step 4: Write back to Worksheet ---
         ws = wb["მიმდინარე "]
-
-        # Write headers if needed
-        for col_idx, col_name in enumerate(orders_df.columns.tolist(), start=1):
-            ws.cell(row=1, column=col_idx).value = col_name
-
-        # Write data values
-        for row_idx, row in enumerate(orders_df.values.tolist(), start=2):
+        for row_idx, row_data in enumerate(orders_df.values.tolist(), start=2):
             for col_idx, col_name in enumerate(orders_df.columns.tolist(), start=1):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                # Only write if cell is empty
-                if cell.value in (None, ""):
-                    cell.value = row[col_idx - 1]
-                    # Format date column if needed
-                    if col_name == "ტვირთი მზადაა ასაღებად" and cell.value:
+                # Update only the specific column to preserve existing formatting elsewhere
+                if col_name == "ტვირთი მზადაა ასაღებად":
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.value = row_data[col_idx - 1]
+                    if cell.value:
                         cell.number_format = "DD/MM/YYYY"
 
-        # Save workbook to memory
+        # --- Step 5: Save and Upload ---
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
 
-        # Upload back
         url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        max_attempts = 10
-        for attempt in range(max_attempts):
+        for attempt in range(10):
             resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
-            if resp.status_code in (423, 409):  # Locked
-                wait_time = min(30, 2**attempt) + random.uniform(0, 2)
-                print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
-                time.sleep(wait_time)
+            if resp.status_code in (423, 409):
+                time.sleep(min(30, 2**attempt))
                 continue
             resp.raise_for_status()
             cursor.execute("INSERT INTO processed_messages (internet_id) VALUES (?)", (internet_id,))
             conn.commit()
-            conn.close()
-            print(f"✅ Excel updated successfully with Khrone packing list")
-            return
+            print(f"✅ Excel updated successfully.")
+            break
+    conn.close()
 
 def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_start: str, delivery_end: str) -> None:
     with EXCEL_LOCK:
