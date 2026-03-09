@@ -3524,14 +3524,17 @@ def webhook():
                     print("✅ Hach PO confirmation → process_hach_message")
                     POOL.submit(process_hach_message, mailbox, message_id, message_date, internet_id)
                     is_processed = True
-            # Pentair confirmation
-            elif is_pentair:
-                print("Pentair confirmation")
-                POOL.submit(process_pentair_message, mailbox, message_id, message_date, internet_id)
-            #ATB confirmation
-            elif is_atb:
-                print("ATB confirmation")
-                POOL.submit(process_atb_message, mailbox, message_id, message_date, internet_id)
+            # --- ATB / Pentair: process ANY mail that has attachments ---
+            elif is_pentair or is_atb:
+                supplier = "Pentair" if is_pentair else "ATB"
+                print(f"✅ {supplier} mail with attachment → processing")
+
+                if is_pentair:
+                    POOL.submit(process_pentair_message, mailbox, message_id, message_date, internet_id)
+                else:
+                    POOL.submit(process_atb_message, mailbox, message_id, message_date, internet_id)
+
+                is_processed = True
             # 4️⃣ Generic PO (Only if the pattern matches OR it's a specific internal request)
             elif has_po_generic:
                 print("↪️ Generic PO mail → process_message")
