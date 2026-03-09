@@ -953,7 +953,10 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
         return trans_lookup.get(normalized, "")
     
     out_df["თარგმანი"] = out_df["Item"].apply(get_translation)
-    out_df['ადგილმდებარეობა'] = "წარმოების პროცესში"
+    if "ადგილმდებარეობა" not in out_df.columns:
+        out_df["ადგილმდებარეობა"] = "წარმოების პროცესში"
+    else:
+        out_df["ადგილმდებარეობა"] = out_df["ადგილმდებარეობა"].replace("", "წარმოების პროცესში")
     # --------------------------------------------------
     # 3️⃣ Final export
     # --------------------------------------------------
@@ -1182,22 +1185,23 @@ def process_shipment(order_number: str, items: list) -> None:
             order_number = str(order_number).strip()
             matching = df_source[df_source["SO"].astype(str).str.strip() == order_number].copy()
 
-
             if matching.empty:
                 print(f"⚠️ No rows found for SO = {order_number}")
                 return
+
+            rows_to_move = []
             delivered_by_sku = defaultdict(float)
+
             for item in items:
                 sku = item["sku"].strip().upper()
                 delivered_by_sku[sku] += float(item.get("quantity", 0))
-            rows_to_move = []
 
             for idx, row in matching.iterrows():
                 sku = row["Code"].strip().upper()
+
                 qty_ordered = float(row["შეკვეთილი რაოდენობა"])
                 qty_delivered_so_far = float(row.get("მიწოდებული რაოდენობა", 0))
 
-                # Delivered in this package
                 newly_delivered = delivered_by_sku.get(sku, 0)
 
                 if newly_delivered == 0:
@@ -1205,7 +1209,6 @@ def process_shipment(order_number: str, items: list) -> None:
 
                 total_delivered = qty_delivered_so_far + newly_delivered
 
-                # Update delivered quantity in source DF
                 df_source.at[idx, "მიწოდებული რაოდენობა"] = total_delivered
 
                 if total_delivered >= qty_ordered:
@@ -1218,7 +1221,7 @@ def process_shipment(order_number: str, items: list) -> None:
                     )
 
             # --- Prepare DataFrame to move ---
-            df_move = matching.loc[rows_to_move].copy()
+            df_move = df_source.loc[rows_to_move].copy()
             df_move["ადგილმდებარეობა"] = "ჩაბარდა"
 
             # --- Append to destination sheet ---
