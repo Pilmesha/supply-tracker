@@ -2574,21 +2574,39 @@ def packing_list(mailbox, message_id, message_date, internet_id):
             df = pd.DataFrame(data[1:], columns=data[0])
             df["Code"] = df["Code"].astype(str).str.strip()
             code_quantity_map = {}
-            for code in df["Code"]:
-                code_str = str(code).strip()
-                pattern = re.compile(
-                    rf"{re.escape(code_str)}\s+(\d+[.,]?\d*)\s+\d+[.,]?\d*\s+\d+"
-                )
-                match = pattern.search(po_text)
-                if match:
-                    qty_str = match.group(1).replace(",", ".")
-                    try:
-                        quantity = float(qty_str)
-                    except ValueError:
-                        quantity = None
-                    code_quantity_map[code_str] = quantity
-                else:
-                    code_quantity_map[code_str] = None
+            for idx, row in df.iterrows():
+                code = str(row["Code"]).strip()
+                code_str = re.escape(code)
+
+                # Get the ordered quantity for validation
+                ordered_qty = row.get("QTY")
+                pattern = re.compile(rf"{code_str}\s+([\d.,\s]+)")
+                match_obj = pattern.search(po_text)
+                quantity = None
+                if match_obj:
+                    potential_string = match_obj.group(1)
+                    # Split by whitespace to get individual number candidates
+                    candidates = re.findall(r"\d+(?:[.,]\d+)?", potential_string)
+                    
+                    for cand_str in candidates:
+                        try:
+                            # Clean up the number format
+                            clean_cand = cand_str.replace(",", ".")
+                            potential_qty = float(clean_cand)
+                            
+                            # Validation Logic
+                            if ordered_qty and isinstance(ordered_qty, (int, float)):
+                                # If the number is within the expected range, it's our QTY
+                                if potential_qty <= ordered_qty:
+                                    quantity = potential_qty
+                                    break # Found it! Move to next code
+                            else:
+                                # No reference QTY, fallback to the first number found
+                                quantity = potential_qty
+                                break
+                        except ValueError:
+                            continue
+                code_quantity_map[code] = quantity
             updated = 0
             for idx, row in df.iterrows():
                 code = str(row["Code"]).strip()
