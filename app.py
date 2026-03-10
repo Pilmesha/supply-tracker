@@ -2575,12 +2575,12 @@ def packing_list(mailbox, message_id, message_date, internet_id):
             df["Code"] = df["Code"].astype(str).str.strip()
             code_quantity_map = {}
             for idx, row in df.iterrows():
-                code = str(row["Code"]).strip()
-                code_str = re.escape(code)
+                base_code = str(row["Code"]).strip()
+                code_pattern_str = re.escape(base_code) + r"(?:-EU)?"
 
                 # Get the ordered quantity for validation
                 ordered_qty = row.get("QTY")
-                pattern = re.compile(rf"{code_str}\s+([\d.,\s]+)")
+                pattern = re.compile(rf"{code_pattern_str}\s+([\d.,\s]+)", re.IGNORECASE)
                 match_obj = pattern.search(po_text)
                 quantity = None
                 if match_obj:
@@ -2606,11 +2606,12 @@ def packing_list(mailbox, message_id, message_date, internet_id):
                                 break
                         except ValueError:
                             continue
-                code_quantity_map[code] = quantity
+                code_quantity_map[base_code] = quantity
             updated = 0
             for idx, row in df.iterrows():
-                code = str(row["Code"]).strip()
-                if code not in po_text:
+                base_code = str(row["Code"]).strip()
+                code_in_pdf_pattern = re.compile(re.escape(base_code) + r"(?:-EU)?", re.IGNORECASE)
+                if not code_in_pdf_pattern.search(po_text):
                     continue
 
                 if is_empty(row.get("Packing List")):
@@ -2623,7 +2624,7 @@ def packing_list(mailbox, message_id, message_date, internet_id):
                     df.at[idx, "ჩამოსვლის სავარაუდო თარიღი"] = arrival_date_str
 
                 if is_empty(row.get("რამდენი გამოიგზავნა")):
-                    df.at[idx, "რამდენი გამოიგზავნა"] = code_quantity_map.get(code)
+                    df.at[idx, "რამდენი გამოიგზავნა"] = code_quantity_map.get(base_code)
 
                 updated += 1
             if updated == 0:
