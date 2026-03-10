@@ -2577,7 +2577,7 @@ def packing_list(mailbox, message_id, message_date, internet_id):
             for code in df["Code"]:
                 code_str = str(code).strip()
                 pattern = re.compile(
-                    rf"{re.escape(code_str)}\s+(\d+(?:[.,]\d+)?)"
+                    rf"{re.escape(code_str)}\s+(\d+[.,]?\d*)\s+\d+[.,]?\d*\s+\d+"
                 )
                 match = pattern.search(po_text)
                 if match:
