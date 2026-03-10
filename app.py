@@ -2577,36 +2577,45 @@ def packing_list(mailbox, message_id, message_date, internet_id):
             for idx, row in df.iterrows():
                 base_code = str(row["Code"]).strip()
                 code_pattern_str = re.escape(base_code) + r"(?:-EU)?"
-
-                # Get the ordered quantity for validation
                 ordered_qty = row.get("QTY")
+                
+                # Use finditer to find ALL occurrences of the code in the PDF text for this PO
                 pattern = re.compile(rf"{code_pattern_str}\s+([\d.,\s]+)", re.IGNORECASE)
-                match_obj = pattern.search(po_text)
-                quantity = None
-                if match_obj:
+                all_matches = pattern.finditer(po_text)
+                
+                total_extracted_qty = 0.0
+                found_at_least_one = False
+
+                for match_obj in all_matches:
                     potential_string = match_obj.group(1)
-                    # Split by whitespace to get individual number candidates
+                    # Find all number candidates in the string following the code
                     candidates = re.findall(r"\d+(?:[.,]\d+)?", potential_string)
                     
                     for cand_str in candidates:
                         try:
-                            # Clean up the number format
                             clean_cand = cand_str.replace(",", ".")
                             potential_qty = float(clean_cand)
                             
-                            # Validation Logic
+                            # Validation Logic: 
+                            # If we have an ordered_qty, only sum it if it's realistic
                             if ordered_qty and isinstance(ordered_qty, (int, float)):
-                                # If the number is within the expected range, it's our QTY
                                 if potential_qty <= ordered_qty:
-                                    quantity = potential_qty
-                                    break # Found it! Move to next code
+                                    total_extracted_qty += potential_qty
+                                    found_at_least_one = True
+                                    break # Move to the next match_obj for this code
                             else:
-                                # No reference QTY, fallback to the first number found
-                                quantity = potential_qty
-                                break
+                                # No reference QTY, just accumulate the first number found for this occurrence
+                                total_extracted_qty += potential_qty
+                                found_at_least_one = True
+                                break 
                         except ValueError:
                             continue
-                code_quantity_map[base_code] = quantity
+                
+                # Only add to map if we actually found the code in the text
+                if found_at_least_one:
+                    code_quantity_map[base_code] = total_extracted_qty
+                else:
+                    code_quantity_map[base_code] = None
             updated = 0
             for idx, row in df.iterrows():
                 base_code = str(row["Code"]).strip()
@@ -3489,6 +3498,9 @@ def webhook():
                 .get("address", "")
                 .lower()
             )
+            if sender_email == "message-service@sender.zohobooks.com":
+                print(f"🚫 Ignoring automated message from Zoho Books: {sender_email}")
+                continue
             message_id = message.get("id")
             message_date = message.get("receivedDateTime")
             if not message_id:
