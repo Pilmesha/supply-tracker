@@ -630,6 +630,15 @@ def should_update(current_val, new_date):
         existing_date = match.group(1).strip()
         return existing_date != str(new_date)
     return True
+def process_po_background(order_id, sheet_name):
+    try:
+        # Step 1: Get the data (Slow)
+        df = get_purchase_order_df(order_id)
+        # Step 2: Append and Format (Very Slow)
+        append_dataframe_to_table(df, sheet_name)
+        print(f"✅ Background processing finished for PO {order_id}")
+    except Exception as e:
+        print(f"❌ Background processing failed for PO {order_id}: {e}")
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
@@ -3112,7 +3121,7 @@ def purchase_webhook():
 
         order_id = request.json.get("data", {}).get("purchaseorders_id")
         try:
-            append_dataframe_to_table(get_purchase_order_df(order_id), "მიმდინარე ")
+            POOL.submit(process_po_background, order_id, "მიმდინარე ")
             return "OK", 200
         except Exception as e:
             return f"Processing error: {e}", 500
