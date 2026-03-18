@@ -49,7 +49,8 @@ MAILBOXES = [
     "info@vortex.ge",
     "archil@vortex.ge",
     "Logistics@vortex.ge",
-    "hach@vortex.ge"
+    "hach@vortex.ge",
+    "techservice@vortex.ge"
 ]
 MAILBOXES_2 = [
     "info@vortex.ge",
