@@ -3546,7 +3546,7 @@ def webhook():
             is_processed = False  # Track if we actually sent this to a POOL task
 
             # 1️⃣ KHRONE readiness
-            if is_khrone and "notification of readiness of goods:" in subject.lower():
+            if is_khrone and "notification of readiness of goods" in subject.lower():
                 print("✅ Khrone packing list → process_khrone_packing_list")
                 POOL.submit(process_khrone_packing_list, mailbox, message_id, message_date, internet_id)
                 is_processed = True
