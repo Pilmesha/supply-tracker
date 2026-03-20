@@ -1,5 +1,5 @@
 import os, requests, hmac, hashlib, io, random, time, threading, gc, base64, re, pdfplumber
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, Request
 import pandas as pd
 from dotenv import load_dotenv
 from openpyxl import load_workbook
@@ -11,6 +11,8 @@ import traceback
 from collections import defaultdict
 import sqlite3
 from watcher import start_watcher
+from typing import Mapping, Any, Optional, Literal, List, Dict, Tuple, Callable
+
 load_dotenv()
 #======CONGIF=====
 # single session (reuse connections)
@@ -94,7 +96,7 @@ def refresh_access_token() -> str:
 
     ACCESS_TOKEN = data["access_token"]
     return ACCESS_TOKEN
-def verify_zoho_signature(request, expected_module):
+def verify_zoho_signature(request: Request, expected_module: str) -> bool:
     # Select secret based on webhook type
     secret_key = (
     os.getenv("PURCHASE_WEBHOOK_SECRET")
@@ -144,7 +146,7 @@ def One_Drive_Auth() -> str:
     except Exception as e:
         print(f"Error getting access token: {e}")
         return None
-def get_headers():
+def get_headers()-> Mapping[str, str]:
     global ACCESS_TOKEN_DRIVE, ACCESS_TOKEN_EXPIRY
     if (ACCESS_TOKEN_DRIVE is None) or (ACCESS_TOKEN_EXPIRY <= datetime.utcnow()):
         One_Drive_Auth()  # refresh token + expiry
@@ -154,13 +156,13 @@ def get_headers():
     }
 
 # =========== HELPER FUNCS FOR EXCEL =============
-def get_used_range(sheet_name: str):
+def get_used_range(sheet_name: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     resp = HTTP.get(url, headers=headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
-def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retries=3):
+def create_table_if_not_exists(range_address: str, sheet_name: str, has_headers: bool = True, retries: int = 3) -> str:
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
 
     # ✅ 1. Query ONLY tables from the specified sheet
@@ -198,13 +200,13 @@ def create_table_if_not_exists(range_address, sheet_name, has_headers=True, retr
         f"❌ Failed to create table after {retries} retries: "
         f"{resp.status_code} {resp.text}"
     )
-def get_table_columns(table_name):
+def get_table_columns(table_name: str) -> list[str]:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
-def delete_table_rows(sheet_name: str, row_numbers: list[int]):
+def delete_table_rows(sheet_name: str, row_numbers: list[int]) -> None:
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
         "Content-Type": "application/json"
@@ -251,7 +253,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
         resp.raise_for_status()
         return io.BytesIO(resp.content)
 
-    hs_stream     = download_excel(HACH_HS)
+    hs_stream = download_excel(HACH_HS)
     letter_stream = download_excel(PERMS_ID)
 
     # --- HS codes ---
@@ -356,7 +358,7 @@ def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
         blocks[po] = pdf_text[start:end]
 
     return blocks
-def graph_safe_request(method, url, headers, json=None, max_retries=5):
+def graph_safe_request(method: Literal["GET", "POST", "PATCH", "DELETE", "PUT"], url: str, headers: Mapping[str, str], json: Optional[dict[str, Any]] = None, max_retries: int = 5) -> requests.Response:
     last_resp = None
 
     for attempt in range(max_retries):
@@ -377,21 +379,15 @@ def graph_safe_request(method, url, headers, json=None, max_retries=5):
             if status not in (423, 429) and status < 500:
                 resp.raise_for_status()
 
-            print(
-                f"⚠️ Graph busy (HTTP {status}), retry {attempt + 1}/{max_retries}"
-            )
+            print(f"⚠️ Graph busy (HTTP {status}), retry {attempt + 1}/{max_retries}")
             time.sleep(1 + attempt * 1.5)
 
         except requests.Timeout:
-            print(
-                f"⏱️ Graph timeout, retry {attempt + 1}/{max_retries}"
-            )
+            print(f"⏱️ Graph timeout, retry {attempt + 1}/{max_retries}")
             time.sleep(1 + attempt * 1.5)
 
         except requests.RequestException as e:
-            print(
-                f"⚠️ Graph exception: {e}, retry {attempt + 1}/{max_retries}"
-            )
+            print(f"⚠️ Graph exception: {e}, retry {attempt + 1}/{max_retries}")
             time.sleep(1 + attempt * 1.5)
 
     print(f"❌ Graph failed after {max_retries} retries")
@@ -400,7 +396,7 @@ def graph_safe_request(method, url, headers, json=None, max_retries=5):
         last_resp.raise_for_status()
     else:
         raise RuntimeError("Graph request failed with no response returned.")
-def is_empty(val):
+def is_empty(val: str) -> bool:
     return val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == ""
 def extract_po_k_mapping(pdf_text: str) -> dict:
     po_pattern = re.compile(r"\bPO[-:#]?\s*(\d+)\b")
@@ -437,7 +433,7 @@ def extract_po_k_mapping(pdf_text: str) -> dict:
             print(f"⚠️ No K found for PO-{po_digits} anywhere")
 
     return mapping
-def get_sheet_values(sheet_name: str):
+def get_sheet_values(sheet_name: str) -> list[list[Any]]:
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/"
         f"{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange?$select=values"
@@ -450,7 +446,7 @@ def get_sheet_values(sheet_name: str):
 
     result = resp.json()
     return result.get("values", [])  # this is the list of rows
-def format_hach_sheet_full(sheet_name: str,start_row: int,row_count: int,table_id: str) -> None:
+def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> None:
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
         "Content-Type": "application/json"
@@ -579,7 +575,7 @@ def load_hach_reference_values() -> set[str]:
 
     wb.close()
     return hach_values
-def get_first_payment_date(invoice_id):
+def get_first_payment_date(invoice_id: str) -> datetime | None:
     headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
         "X-com-zoho-inventory-organizationid": ORG_ID
@@ -623,7 +619,7 @@ def get_first_payment_date(invoice_id):
     except Exception as e:
         print(f"❌ Failed to get payment date for {invoice_id}: {e}")
         return None
-def should_update(current_val, new_date):
+def should_update(current_val: str, new_date: str) -> bool:
     if pd.isna(current_val) or current_val == "":
         return True
     match = re.search(r"\((.*?)\)", str(current_val))
@@ -631,7 +627,7 @@ def should_update(current_val, new_date):
         existing_date = match.group(1).strip()
         return existing_date != str(new_date)
     return True
-def process_po_background(order_id, sheet_name):
+def process_po_background(order_id: str, sheet_name: str) -> None:
     try:
         # Step 1: Get the data (Slow)
         df = get_purchase_order_df(order_id)
@@ -669,7 +665,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     if so_numbers:
         for so_num in so_numbers:
             so_num = so_num.upper()
-            print(f"\nDebug: Fetching SO {so_num}")
+            print(f"\nFetching SO {so_num}")
             try:
                 # First get the sales order to get its ID
                 search_response = HTTP.get(
@@ -752,7 +748,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                         try:
                                             first_payment_date = datetime.strptime(raw_payment_date, "%Y-%m-%d").date()
                                         except ValueError:
-                                            print(f"Debug: Unexpected payment date format: {raw_payment_date}")
+                                            print(f"Unexpected payment date format: {raw_payment_date}")
                                             first_payment_date = None
                                     else:
                                         first_payment_date = None
@@ -775,12 +771,12 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                                                 else f"{start_str} - {end_str}"
                                             )
                                         else:
-                                            print(f"Debug: Delivery lead time format not recognized for SO {so_num}")
+                                            print(f"Delivery lead time format not recognized for SO {so_num}")
                                     else:
-                                        print(f"Debug: Could not calculate delivery from payment for SO {so_num}")
+                                        print(f"Could not calculate delivery from payment for SO {so_num}")
 
                             except Exception as e:
-                                print(f"Debug: Error fetching invoices for SO {so_num}: {e}")
+                                print(f"Error fetching invoices for SO {so_num}: {e}")
 
                         line_items = so_detail.get("line_items", [])
                         # Process ALL line items - NO break here
@@ -804,7 +800,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         break  # Break only after processing this SO
                         
             except Exception as e:
-                print(f"Debug: Error fetching SO {so_num}: {e}")
+                print(f"Error fetching SO {so_num}: {e}")
                 continue
     
     # Debug: Print PO items
@@ -858,7 +854,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # ALWAYS return the DataFrame
     return df
 
-def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str):
+def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
     df = df[df['Supplier Company'] != 'HACH']
     perms_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{PERMS_ID}/content"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
@@ -1171,7 +1167,7 @@ def process_hach(df: pd.DataFrame) -> None:
                 print(f"   ➕ Added batch {i // batch_size + 1}")
 
             print(f"✅ HACH workflow completed. Added {len(rows)} rows.")
-            POOL.submit(format_hach_sheet_full, sheet_name,start_row, len(normalized_df), table_id)
+            POOL.submit(format_hach_sheet_full, sheet_name,start_row, len(normalized_df))
 
         except Exception as e:
             print(f"❌ HACH processing failed: {e}")
@@ -1505,7 +1501,7 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
                 file_stream.close()
             gc.collect()
 
-def process_message(mailbox, message_id, message_date, internet_id):
+def process_message(mailbox: str, message_id: str, message_date: datetime | str, internet_id: str) -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
@@ -1625,7 +1621,7 @@ def process_message(mailbox, message_id, message_date, internet_id):
                     if pd.isna(current_val) or current_val == "":
                         orders_df.at[idx, "Confirmation-ის მოსვლის თარიღი"] = confirmation_date
                         updated_rows += 1
-                        print("   Filled confirmation date")
+                        print("Filled confirmation date")
         if updated_rows == 0:
             print("⚠️ No matching item codes found in any confirmation PDFs.")
             conn.close()
@@ -1672,7 +1668,7 @@ def process_message(mailbox, message_id, message_date, internet_id):
             gc.collect()
             return
 
-def process_hach_message(mailbox, message_id, message_date, internet_id):
+def process_hach_message(mailbox: str, message_id: str, message_date: datetime | str, internet_id: str) -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
@@ -1834,7 +1830,7 @@ def process_hach_message(mailbox, message_id, message_date, internet_id):
             print(f"✅ HACH update successful ({updated} rows)")
             return
 
-def process_khrone_message(mailbox, message_id, message_date, internet_id):
+def process_khrone_message(mailbox: str, message_id: str, message_date: datetime | str, internet_id: str) -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
@@ -2006,7 +2002,7 @@ def process_khrone_message(mailbox, message_id, message_date, internet_id):
     conn.close()
     gc.collect()
 
-def process_pentair_message(mailbox, message_id, message_date, internet_id):
+def process_pentair_message(mailbox: str, message_id: str, message_date: datetime | str, internet_id: str) -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
@@ -2187,7 +2183,7 @@ def process_pentair_message(mailbox, message_id, message_date, internet_id):
             gc.collect()
             return
 
-def process_atb_message(mailbox, message_id, message_date, internet_id):
+def process_atb_message(mailbox: str, message_id: str, message_date: datetime | str, internet_id: str) -> None:
     conn = sqlite3.connect(DB_PATH)
     try:
         cursor = conn.cursor()
@@ -2462,7 +2458,7 @@ def process_atb_message(mailbox, message_id, message_date, internet_id):
         del wb
         gc.collect() # Trigger memory cleanup
 
-def packing_list(mailbox, message_id, message_date, internet_id):
+def packing_list(mailbox: str, message_id: str, message_date: datetime | str, internet_id: str) -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
@@ -2681,7 +2677,7 @@ def packing_list(mailbox, message_id, message_date, internet_id):
             print(f"🎉 Packing List updated successfully ({total_updated} rows)")
             return
 
-def process_khrone_packing_list(mailbox, message_id, message_date, internet_id):
+def process_khrone_packing_list(mailbox: str, message_id: str, message_date: datetime | str, internet_id: str) -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_messages WHERE internet_id = ?", (internet_id,))
@@ -3054,7 +3050,7 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
 
 
 
-def send_email(customer_name:str, customer_mail:str, attachments):
+def send_email(customer_name:str, customer_mail:str, attachments: List[Dict[str, Any]]) -> None:
     EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     if not customer_mail or not isinstance(customer_mail, str):
         print("⚠️ Missing customer email — skipping")
@@ -3073,7 +3069,6 @@ def send_email(customer_name:str, customer_mail:str, attachments):
     today_str = date.today().strftime("%d-%m-%Y") 
     # ===== EMAIL CONTENT =====
     if is_special:
-        print("SLAAYYY this is special")
         subject = f"შეკვეთა დასრულებულია"
         body = f"""
         <p>მოგესალმებით,</p>
@@ -3082,7 +3077,6 @@ def send_email(customer_name:str, customer_mail:str, attachments):
         <p>პატივისცემით,<br>შპს „საქართველოს წყლის სისტემები“, 405310088.</p>
         """
     else:
-        print("NOT slay, not special")
         subject = f"შეკვეთა დასრულებულია"
         body = f"""
         <p>მოგესალმებით,</p>
@@ -3177,9 +3171,6 @@ def delivered_webhook():
     package_id = request.json.get("data", {}).get("package_id")
     customer_name = request.json.get("data", {}).get("customer_name")
     customer_mail = request.json.get("data", {}).get("customer_mail")
-    print(order_num)
-    print(customer_name)
-    print(customer_mail)
     headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
     }
@@ -3247,8 +3238,9 @@ def delivered_webhook():
     process_future = POOL.submit(process_shipment, order_num, items)
     try:
         # Get results or raise exceptions
-        email_result = email_future.result(timeout=30)
-        process_result = process_future.result(timeout=30)
+        email_future.result(timeout=30)
+        print(f"Email sent to address: {customer_mail}")
+        process_future.result(timeout=30)
         return "OK", 200
     except Exception as e:
         # Log which task failed
@@ -3364,11 +3356,11 @@ def invoice_webhook():
     return "OK", 200
 
 # ===========MAIL PROCESSING============
-def safe_request(method, url, **kwargs):
+def safe_request(method: str, url: str, **kwargs: Any) -> requests.Response:
     timeout = kwargs.pop("timeout", 30)
     func = getattr(HTTP, method.lower())
     return func(url, timeout=timeout, **kwargs)
-def clear_all_subscriptions():
+def clear_all_subscriptions() -> None:
     headers = get_headers()
     subs_url = f"{GRAPH_URL}/subscriptions"
     resp = safe_request("get", subs_url, headers=headers)
@@ -3385,7 +3377,7 @@ def clear_all_subscriptions():
             print(f"Could not delete {sub_id}: {dresp.text}")
         else:
             print(f"Deleted subscription {sub_id}")
-def create_subscription_for_user(mailbox):
+def create_subscription_for_user(mailbox: str) -> Optional[Dict[str, Any]]:
     expiration_time = (datetime.utcnow() + timedelta(minutes=4230)).isoformat() + "Z"
     data = {
         "changeType": "created",
@@ -3416,7 +3408,7 @@ def create_subscription_for_user(mailbox):
     else:
         print(f"❌ Failed to create subscription for {mailbox}: {response.status_code} {response.text}")
         return None
-def initialize_subscriptions():
+def initialize_subscriptions() -> List[Tuple[str, str]]:
     print("[initialize_subscriptions] Setting up subscriptions...")
     clear_all_subscriptions()
     futures = []
@@ -3438,7 +3430,7 @@ def initialize_subscriptions():
 
     print(f"\n✅ Successfully created {len(successful_subs)}/{len(MAILBOXES)} subscriptions")
     return successful_subs
-def with_app_ctx_call(fn, *args, **kwargs):
+def with_app_ctx_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     with app.app_context():
         return fn(*args, **kwargs)
 
@@ -3509,14 +3501,12 @@ def webhook():
                 .lower()
             )
             if sender_email == "message-service@sender.zohobooks.com":
-                print(f"🚫 Ignoring automated message from Zoho Books: {sender_email}")
                 continue
             message_id = message.get("id")
             message_date = message.get("receivedDateTime")
             if not message_id:
                 continue
             if sender_email in MAILBOXES_2:
-                print("↩️ Ignoring self-sent email")
                 continue
             mailbox = "unknown"
             try:
