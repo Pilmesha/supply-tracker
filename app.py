@@ -2544,7 +2544,6 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
             return
         print(f"🔗 PO → Packing List mapping: {po_k_map}")
         po_text_map = split_pdf_by_po(pdf_text, list(po_k_map.keys()))
-        print(po_text_map)
         # --- Step 5: Open Excel ONCE ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
         resp = HTTP.get(url_download, headers=headers, timeout=60)
