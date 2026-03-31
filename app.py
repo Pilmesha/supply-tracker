@@ -97,26 +97,28 @@ def refresh_access_token() -> str:
     ACCESS_TOKEN = data["access_token"]
     return ACCESS_TOKEN
 def verify_zoho_signature(request: Request, expected_module: str) -> bool:
-    # 1. Use a dictionary for cleaner lookups and to avoid 'if/else' chain hell
-    secrets = {
-        "purchaseorders": os.getenv("PURCHASE_WEBHOOK_SECRET"),
-        "purchasereceives": os.getenv("RECEIVE_WEBHOOK_SECRET"), # Check pluralization
-        "invoice": os.getenv("INVOICE_WEBHOOK_SECRET"),
-        "shipment": os.getenv("SHIPMENT_WEBHOOK_SECRET")
-    }
-    
-    secret = secrets.get(expected_module)
-    received_sign = request.headers.get('X-Zoho-Webhook-Signature')
+    # Select secret based on webhook type
+    secret_key = (
+    os.getenv("PURCHASE_WEBHOOK_SECRET")
+    if expected_module == "purchaseorders"
+    else os.getenv("RECEIVE_WEBHOOK_SECRET")
+    if expected_module == "purchasereceive"
+    else os.getenv("INVOICE_WEBHOOK_SECRET")
+    if expected_module == "invoice"
+    else os.getenv("SHIPMENT_WEBHOOK_SECRET")
 
-    if not received_sign or not secret:
+    ).encode("utf-8")
+
+    received_sign = request.headers.get('X-Zoho-Webhook-Signature')
+    if not received_sign or not secret_key:
         return False
 
     expected_sign = hmac.new(
-        secret.encode("utf-8"),
+        secret_key,
         request.get_data(),
         hashlib.sha256
     ).hexdigest()
-    
+
     return hmac.compare_digest(received_sign, expected_sign)
 def One_Drive_Auth() -> str:
     global ACCESS_TOKEN_DRIVE, ACCESS_TOKEN_EXPIRY
