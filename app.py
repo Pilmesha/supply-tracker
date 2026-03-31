@@ -3109,17 +3109,34 @@ def index():
 def purchase_webhook():
     try:
         One_Drive_Auth()
-
         if not verify_zoho_signature(request, "purchaseorders"):
             return "Invalid signature", 403
+        raw_data = request.get_data(as_text=True)
+        if raw_data.endswith('=""'):
+            raw_data = raw_data[:-3]
+        fixed_json = re.sub(
+            r':\s*"(.*?)"(?=\s*[,}])', 
+            lambda m: ': "' + m.group(1).replace('"', '\\"') + '"', 
+            raw_data
+        )
+        try:
+            payload = json.loads(fixed_json)
+        except json.JSONDecodeError as je:
+            print(f"❌ Still failed to decode JSON after repair: {je}")
+            # Fallback: if repair failed, try standard request.json just in case
+            payload = request.get_json(silent=True) or {}
 
-        order_id = request.json.get("data", {}).get("purchaseorders_id")
+        # 4. Extract ID and proceed
+        order_id = payload.get("data", {}).get("purchaseorders_id")
+        
+        if not order_id:
+            return "No purchaseorders_id found in payload", 400
+
         try:
             POOL.submit(process_po_background, order_id, "მიმდინარე ")
             return "OK", 200
         except Exception as e:
             return f"Processing error: {e}", 500
-
 
     except Exception as e:
         print(f"❌ Webhook processing error: {e}")
