@@ -12,7 +12,7 @@ from collections import defaultdict
 import sqlite3
 from watcher import start_watcher
 from typing import Mapping, Any, Optional, Literal, List, Dict, Tuple, Callable
-
+import json
 load_dotenv()
 #======CONGIF=====
 # single session (reuse connections)
@@ -3111,26 +3111,29 @@ def purchase_webhook():
         One_Drive_Auth()
         if not verify_zoho_signature(request, "purchaseorders"):
             return "Invalid signature", 403
-        raw_data = request.get_data(as_text=True)
-        if raw_data.endswith('=""'):
-            raw_data = raw_data[:-3]
-        fixed_json = re.sub(
+        raw_payload = request.get_data(as_text=True)
+
+        if raw_payload.endswith('=""'):
+            raw_payload = raw_payload[:-3]
+
+        fixed_payload = re.sub(
             r':\s*"(.*?)"(?=\s*[,}])', 
             lambda m: ': "' + m.group(1).replace('"', '\\"') + '"', 
-            raw_data
+            raw_payload
         )
-        try:
-            payload = json.loads(fixed_json)
-        except json.JSONDecodeError as je:
-            print(f"❌ Still failed to decode JSON after repair: {je}")
-            # Fallback: if repair failed, try standard request.json just in case
-            payload = request.get_json(silent=True) or {}
 
-        # 4. Extract ID and proceed
-        order_id = payload.get("data", {}).get("purchaseorders_id")
+        try:
+            data = json.loads(fixed_payload)
+        except json.JSONDecodeError as e:
+            print(f"❌ Manual JSON parsing failed: {e}")
+            return "Malformed JSON payload", 400
+
+        # 6. Extract ID and pass to background pool
+        order_id = data.get("data", {}).get("purchaseorders_id")
         
         if not order_id:
-            return "No purchaseorders_id found in payload", 400
+            print("❌ No order_id found in the repaired payload")
+            return "Missing Data", 400
 
         try:
             POOL.submit(process_po_background, order_id, "მიმდინარე ")
