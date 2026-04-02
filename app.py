@@ -3293,6 +3293,14 @@ def invoice_webhook():
         headers=headers,
         params={"salesorder_number": so_number}
     )
+    if search_resp.status_code == 401:
+        ACCESS_TOKEN = refresh_access_token()
+        headers["Authorization"] = f"Zoho-oauthtoken {ACCESS_TOKEN}"
+        search_resp = HTTP.get(
+            "https://www.zohoapis.com/inventory/v1/salesorders",
+            headers=headers,
+            params={"salesorder_number": so_number}
+        )
     search_resp.raise_for_status()
 
     salesorders = search_resp.json().get("salesorders", [])
@@ -3310,6 +3318,13 @@ def invoice_webhook():
         f"https://www.zohoapis.com/inventory/v1/salesorders/{so_id}",
         headers=headers
     )
+    if so_resp.status_code == 401:
+        ACCESS_TOKEN = refresh_access_token()
+        headers["Authorization"] = f"Zoho-oauthtoken {ACCESS_TOKEN}"
+        so_resp = HTTP.get(
+            f"https://www.zohoapis.com/inventory/v1/salesorders/{so_id}",
+            headers=headers
+        )
     so_resp.raise_for_status()
     so_detail = so_resp.json().get("salesorder", {})
 
