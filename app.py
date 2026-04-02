@@ -3270,6 +3270,7 @@ def delivered_webhook():
         return f"Processing error: {e}", 500
 @app.route("/invoice", methods=["POST"])
 def invoice_webhook():
+    global ACCESS_TOKEN
     One_Drive_Auth()
 
     if not verify_zoho_signature(request, "invoice"):
