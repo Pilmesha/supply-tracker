@@ -3335,6 +3335,7 @@ def invoice_webhook():
         .get("custom_field_hash", {})
         .get("cf_delivery_after_payment", "")
     )
+    print(so_detail)
 
     if not delivery_cf:
         return jsonify({
