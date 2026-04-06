@@ -568,7 +568,7 @@ def load_hach_reference_values() -> set[str]:
 
     hach_values = set()
 
-    for row in ws.iter_rows(min_row=1):
+    for row in ws.iter_rows(min_row=3):
         cell = row[0].value  # FIRST COLUMN
         if cell:
             hach_values.add(str(cell).strip().upper())
