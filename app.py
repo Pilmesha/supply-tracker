@@ -3363,8 +3363,14 @@ def invoice_webhook():
     # 5️⃣ Split items by HACH / NON-HACH (EXCEL-BASED)
     hach_skus = []
     non_hach_skus = []
-
-    hach_reference = load_hach_reference_values()  # Excel first column → SET
+    def download_excel(file_id):
+        url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_HS}/content"
+        resp = HTTP.get(url, headers=headers, timeout=60)
+        resp.raise_for_status()
+        return io.BytesIO(resp.content)
+    hs_stream = download_excel(HACH_HS)
+    hs_df = pd.read_excel(hs_stream, header=[0,1])
+    hach_reference = set(hs_df.iloc[:, 0])
     print(hach_reference)
     for item in so_detail.get("line_items", []):
         sku = item.get("sku")
