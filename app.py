@@ -3380,7 +3380,8 @@ def invoice_webhook():
             hach_skus.append(sku.upper())
         else:
             non_hach_skus.append(sku.upper())
-
+    print(hach_skus)
+    print(f'{start_str} - {end_str}')
     # 6️⃣ Update NON-HACH (SO + SKU)
     if non_hach_skus:
         POOL.submit(delivery_date_nonhach, so_number, non_hach_skus, start_str, end_str)
