@@ -158,12 +158,12 @@ def get_headers()-> Mapping[str, str]:
 # =========== HELPER FUNCS FOR EXCEL =============
 def get_used_range(sheet_name: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
     resp = HTTP.get(url, headers=headers, params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
 def create_table_if_not_exists(range_address: str, sheet_name: str, has_headers: bool = True, retries: int = 3) -> str:
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
     # ✅ 1. Query ONLY tables from the specified sheet
     url_sheet_tables = (
@@ -202,13 +202,13 @@ def create_table_if_not_exists(range_address: str, sheet_name: str, has_headers:
     )
 def get_table_columns(table_name: str) -> list[str]:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
 def delete_table_rows(sheet_name: str, row_numbers: list[int]) -> None:
     headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
         "Content-Type": "application/json"
     }
 
@@ -439,7 +439,7 @@ def get_sheet_values(sheet_name: str) -> list[list[Any]]:
         f"{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange?$select=values"
     )
     
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}"}
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
     
     resp = HTTP.get(url, headers=headers)
     resp.raise_for_status()
@@ -448,7 +448,7 @@ def get_sheet_values(sheet_name: str) -> list[list[Any]]:
     return result.get("values", [])  # this is the list of rows
 def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> None:
     headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
         "Content-Type": "application/json"
     }
 
@@ -972,7 +972,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
     f"/items/{FILE_ID}/workbook/tables/{table_name}/range"
     )
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}", "Content-Type": "application/json"}
     tbl_range = HTTP.get(tbl_range_url, headers=headers, timeout=30).json()["address"]
 
     tbl_range = tbl_range.split("!")[-1]  # A1:X57
@@ -1074,7 +1074,7 @@ def process_hach(df: pd.DataFrame) -> None:
             sheet_name = po_number
             print(f"\n📌 Creating HACH sheet '{sheet_name}'...")
             base_headers = {
-                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
                 "Content-Type": "application/json"
             }
 
@@ -3087,7 +3087,7 @@ def send_email(customer_name:str, customer_mail:str, attachments: List[Dict[str,
         r = HTTP.post(
             f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail",
             headers={
-                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
                 "Content-Type": "application/json"
             },
             json={
@@ -3365,7 +3365,7 @@ def invoice_webhook():
     non_hach_skus = []
     def download_excel(file_id):
         ms_headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
         "Content-Type": "application/json"
         }
         url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_HS}/content"
@@ -3375,19 +3375,16 @@ def invoice_webhook():
     hs_stream = download_excel(HACH_HS)
     hs_df = pd.read_excel(hs_stream, header=[0,1])
     hach_reference = set(hs_df.iloc[:, 0])
-    print(hach_reference)
     for item in so_detail.get("line_items", []):
         sku = item.get("sku")
         code = item.get("custom_field_hash", {}).get("cf_code")
         if not sku or not code:
             continue
         normalized_code = str(code).strip().upper()
-        print(normalized_code)
         if normalized_code in hach_reference:
             hach_skus.append(sku.upper())
         else:
             non_hach_skus.append(sku.upper())
-    print(hach_skus)
     # 6️⃣ Update NON-HACH (SO + SKU)
     if non_hach_skus:
         POOL.submit(delivery_date_nonhach, so_number, non_hach_skus, start_str, end_str)
