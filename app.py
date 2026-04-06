@@ -3364,8 +3364,12 @@ def invoice_webhook():
     hach_skus = []
     non_hach_skus = []
     def download_excel(file_id):
+        ms_headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
+        "Content-Type": "application/json"
+        }
         url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_HS}/content"
-        resp = HTTP.get(url, headers=headers, timeout=60)
+        resp = HTTP.get(url, headers=ms_headers, timeout=60)
         resp.raise_for_status()
         return io.BytesIO(resp.content)
     hs_stream = download_excel(HACH_HS)
