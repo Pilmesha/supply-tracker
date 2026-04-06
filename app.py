@@ -554,27 +554,6 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
             {"columnWidth": width}
         ).raise_for_status()
     print("🎨 HACH formatting applied")
-def load_hach_reference_values() -> set[str]:
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_HS}/content"
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"
-    }
-
-    resp = HTTP.get(url, headers=headers, timeout=60)
-    resp.raise_for_status()
-
-    wb = load_workbook(io.BytesIO(resp.content), read_only=True)
-    ws = wb.active  # assume first sheet
-
-    hach_values = set()
-
-    for row in ws.iter_rows(min_row=3):
-        cell = row[0].value  # FIRST COLUMN
-        if cell:
-            hach_values.add(str(cell).strip().upper())
-
-    wb.close()
-    return hach_values
 def get_first_payment_date(invoice_id: str) -> datetime | None:
     headers = {
         "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
