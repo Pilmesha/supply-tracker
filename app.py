@@ -555,7 +555,7 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
         ).raise_for_status()
     print("🎨 HACH formatting applied")
 def load_hach_reference_values() -> set[str]:
-    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_HS}/content"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"
     }
@@ -3335,7 +3335,6 @@ def invoice_webhook():
         .get("custom_field_hash", {})
         .get("cf_delivery_after_payment", "")
     )
-    print(so_detail)
 
     if not delivery_cf:
         return jsonify({
@@ -3379,7 +3378,6 @@ def invoice_webhook():
         else:
             non_hach_skus.append(sku.upper())
     print(hach_skus)
-    print(f'{start_str} - {end_str}')
     # 6️⃣ Update NON-HACH (SO + SKU)
     if non_hach_skus:
         POOL.submit(delivery_date_nonhach, so_number, non_hach_skus, start_str, end_str)
