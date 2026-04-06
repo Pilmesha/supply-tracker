@@ -3366,16 +3366,14 @@ def invoice_webhook():
     non_hach_skus = []
 
     hach_reference = load_hach_reference_values()  # Excel first column → SET
-
+    print(hach_reference)
     for item in so_detail.get("line_items", []):
         sku = item.get("sku")
         code = item.get("custom_field_hash", {}).get("cf_code")
-
         if not sku or not code:
             continue
-
         normalized_code = str(code).strip().upper()
-
+        print(normalized_code)
         if normalized_code in hach_reference:
             hach_skus.append(sku.upper())
         else:
