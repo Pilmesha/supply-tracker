@@ -29,6 +29,7 @@ HTTP.mount("http://", adapter)
 POOL = ThreadPoolExecutor(max_workers=4)  # tune 2-4 on free tier
 # single lock to avoid concurrent workbook uploads
 EXCEL_LOCK = threading.Lock()
+TOKEN_LOCK = threading.Lock()
 
 CLIENT_ID = os.getenv('CLIENT_ID')
 CLIENT_SECRET = os.getenv('CLIENT_SECRET')
@@ -44,8 +45,9 @@ HACH_FILE = os.getenv('HACH_FILE')
 HACH_HS = os.getenv('HACH_HS')
 TRANS_FILE = os.getenv("TRANS_FILE")
 ACCESS_TOKEN_DRIVE = None
-ACCESS_TOKEN_EXPIRY = datetime.utcnow()
 ACCESS_TOKEN = None
+DRIVE_EXPIRY = datetime.utcnow()
+ZOHO_EXPIRY = datetime.utcnow()
 
 MAILBOXES = [
     "info@vortex.ge",
@@ -76,7 +78,7 @@ start_watcher()
 
 # ======= AUTH ===========
 def refresh_access_token() -> str:
-    global ACCESS_TOKEN
+    global ACCESS_TOKEN, ZOHO_EXPIRY
 
     url = "https://accounts.zoho.com/oauth/v2/token"
     params = {
@@ -88,13 +90,17 @@ def refresh_access_token() -> str:
 
     resp = HTTP.post(url, params=params)
     resp.raise_for_status()
-
     data = resp.json()
 
     if "access_token" not in data:
         raise Exception(f"Zoho token refresh failed: {data}")
 
+    # 1. Update the token
     ACCESS_TOKEN = data["access_token"]
+    expires_in = data.get("expires_in", 3600) 
+    ZOHO_EXPIRY = datetime.utcnow() + timedelta(seconds=expires_in - 300)
+
+    print(f"✅ Zoho Token refreshed. New expiry: {ZOHO_EXPIRY}")
     return ACCESS_TOKEN
 def verify_zoho_signature(request: Request, expected_module: str) -> bool:
     # Select secret based on webhook type
@@ -121,7 +127,7 @@ def verify_zoho_signature(request: Request, expected_module: str) -> bool:
 
     return hmac.compare_digest(received_sign, expected_sign)
 def One_Drive_Auth() -> str:
-    global ACCESS_TOKEN_DRIVE, ACCESS_TOKEN_EXPIRY
+    global ACCESS_TOKEN_DRIVE, DRIVE_EXPIRY
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
         "grant_type": "client_credentials",
@@ -136,7 +142,7 @@ def One_Drive_Auth() -> str:
         
         ACCESS_TOKEN_DRIVE = response_json.get("access_token")
         expires_in = response_json.get("expires_in", 3600)
-        ACCESS_TOKEN_EXPIRY = datetime.utcnow() + timedelta(seconds=expires_in - 60)  # refresh 1 min early
+        DRIVE_EXPIRY = datetime.utcnow() + timedelta(seconds=expires_in - 60)
         
         if ACCESS_TOKEN_DRIVE:
             return ACCESS_TOKEN_DRIVE
@@ -147,23 +153,32 @@ def One_Drive_Auth() -> str:
         print(f"Error getting access token: {e}")
         return None
 def get_headers()-> Mapping[str, str]:
-    global ACCESS_TOKEN_DRIVE, ACCESS_TOKEN_EXPIRY
-    if (ACCESS_TOKEN_DRIVE is None) or (ACCESS_TOKEN_EXPIRY <= datetime.utcnow()):
-        One_Drive_Auth()  # refresh token + expiry
+    global ACCESS_TOKEN_DRIVE, DRIVE_EXPIRY
+    with TOKEN_LOCK: # Keep this thread-safe too!
+        if ACCESS_TOKEN_DRIVE is None or datetime.utcnow() >= DRIVE_EXPIRY:
+            One_Drive_Auth()
     return {
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
         "Content-Type": "application/json"
     }
-
+def get_zoho_headers():
+    global ACCESS_TOKEN, ZOHO_EXPIRY
+    with TOKEN_LOCK:
+        # Check if token is missing OR expired
+        if ACCESS_TOKEN is None or datetime.utcnow() >= ACCESS_TOKEN_EXPIRY:
+            refresh_access_token()
+            
+    return {
+        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN}",
+        "X-com-zoho-inventory-organizationid": ORG_ID
+    }
 # =========== HELPER FUNCS FOR EXCEL =============
 def get_used_range(sheet_name: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-    resp = HTTP.get(url, headers=headers, params={"valuesOnly": "false"})
+    resp = HTTP.get(url, headers=get_headers(), params={"valuesOnly": "false"})
     resp.raise_for_status()
     return resp.json()["address"]  # e.g. "მიმდინარე !A1:Y20"
 def create_table_if_not_exists(range_address: str, sheet_name: str, has_headers: bool = True, retries: int = 3) -> str:
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
     # ✅ 1. Query ONLY tables from the specified sheet
     url_sheet_tables = (
@@ -171,7 +186,7 @@ def create_table_if_not_exists(range_address: str, sheet_name: str, has_headers:
         f"/workbook/worksheets/{sheet_name}/tables"
     )
 
-    resp = HTTP.get(url_sheet_tables, headers=headers)
+    resp = HTTP.get(url_sheet_tables, headers=get_headers())
     resp.raise_for_status()
     sheet_tables = resp.json().get("value", [])
 
@@ -202,16 +217,10 @@ def create_table_if_not_exists(range_address: str, sheet_name: str, has_headers:
     )
 def get_table_columns(table_name: str) -> list[str]:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/columns"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-    resp = HTTP.get(url, headers=headers)
+    resp = HTTP.get(url, headers=get_headers())
     resp.raise_for_status()
     return [col["name"] for col in resp.json().get("value", [])]
 def delete_table_rows(sheet_name: str, row_numbers: list[int]) -> None:
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
-        "Content-Type": "application/json"
-    }
-
     for row in sorted(row_numbers, reverse=True):
         address = f"{row}:{row}"  # delete whole row
         url = (
@@ -219,7 +228,7 @@ def delete_table_rows(sheet_name: str, row_numbers: list[int]) -> None:
             f"/workbook/worksheets/{sheet_name}/range(address='{address}')/delete"
         )
 
-        resp = HTTP.post(url, headers=headers, json={"shift": "up"})
+        resp = HTTP.post(url, headers=get_headers(), json={"shift": "up"})
         if resp.status_code not in (200, 204):
             print(f"⚠️ Failed to delete row {row}: {resp.text}")
         else:
@@ -245,11 +254,9 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     df["Item"] = df.index + 1
 
     # --- Download reference files ---
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-
     def download_excel(file_id):
         url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{file_id}/content"
-        resp = HTTP.get(url, headers=headers, timeout=60)
+        resp = HTTP.get(url, headers=get_headers(), timeout=60)
         resp.raise_for_status()
         return io.BytesIO(resp.content)
 
@@ -269,7 +276,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     letter_stream.close()
     # --- Translations ---
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{TRANS_FILE}/content"
-    resp = HTTP.get(url, headers=headers, timeout=60)
+    resp = HTTP.get(url, headers=get_headers(), timeout=60)
     resp.raise_for_status()
     trans = pd.read_excel(io.BytesIO(resp.content))
     trans_lookup = {}
@@ -439,18 +446,12 @@ def get_sheet_values(sheet_name: str) -> list[list[Any]]:
         f"{FILE_ID}/workbook/worksheets/{sheet_name}/usedRange?$select=values"
     )
     
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
-    
-    resp = HTTP.get(url, headers=headers)
+    resp = HTTP.get(url, headers=get_headers())
     resp.raise_for_status()
 
     result = resp.json()
     return result.get("values", [])  # this is the list of rows
 def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> None:
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
-        "Content-Type": "application/json"
-    }
 
     last_row = start_row + row_count
     info_range  = "C3:D6"
@@ -468,7 +469,7 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
         "PATCH",
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
         f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')/format",
-        headers,
+        get_headers(),
         {"verticalAlignment": "Center", "horizontalAlignment": "Center"}
     ).raise_for_status()
 
@@ -482,7 +483,7 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
             f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}"
             f"/workbook/worksheets/{sheet_name}/range(address='{info_range}')"
             f"/format/borders/{edge}",
-            headers,
+            get_headers(),
             {"style": "Continuous", "weight": "Thin", "color": "#000000"}
         ).raise_for_status()
     # -------------------------------------------------
@@ -492,7 +493,7 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
         "PATCH",
         f"{base_url}/worksheets/{sheet_name}"
         f"/range(address='{header_range}')/format",
-        headers,
+        get_headers(),
         {
             "horizontalAlignment": "Center",
             "verticalAlignment": "Center",
@@ -503,7 +504,7 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
     "PATCH",
     f"{base_url}/worksheets/{sheet_name}"
     f"/range(address='{sheet_name}!{start_row}:{start_row}')/format",
-    headers,
+    get_headers(),
     {"rowHeight": 20}
     ).raise_for_status()
 
@@ -515,7 +516,7 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
         "PATCH",
         f"{base_url}/worksheets/{sheet_name}"
         f"/range(address='{data_range}')/format",
-        headers,
+        get_headers(),
         {
             "horizontalAlignment": "Center",
             "verticalAlignment": "Center",
@@ -530,7 +531,7 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
         "PATCH",
         f"{base_url}/worksheets/{sheet_name}"
         f"/range(address='{sheet_name}!{start_row + 1}:{last_row}')/format",
-        headers,
+        get_headers(),
         {"rowHeight": 35}
     ).raise_for_status()
 
@@ -550,20 +551,15 @@ def format_hach_sheet_full(sheet_name: str, start_row: int, row_count: int) -> N
             "PATCH",
             f"{base_url}/worksheets/{sheet_name}"
             f"/range(address='{sheet_name}!{col}:{col}')/format",
-            headers,
+            get_headers(),
             {"columnWidth": width}
         ).raise_for_status()
     print("🎨 HACH formatting applied")
 def get_first_payment_date(invoice_id: str) -> datetime | None:
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
-        "X-com-zoho-inventory-organizationid": ORG_ID
-    }
-
     try:
         payments_url = f"https://www.zohoapis.com/inventory/v1/invoices/{invoice_id}/payments"
 
-        payments_resp = HTTP.get(payments_url, headers=headers)
+        payments_resp = HTTP.get(payments_url, headers=get_zoho_headers())
         payments_resp.raise_for_status()
 
         payments = payments_resp.json().get("payments", [])
@@ -598,14 +594,6 @@ def get_first_payment_date(invoice_id: str) -> datetime | None:
     except Exception as e:
         print(f"❌ Failed to get payment date for {invoice_id}: {e}")
         return None
-def should_update(current_val: str, new_date: str) -> bool:
-    if pd.isna(current_val) or current_val == "":
-        return True
-    match = re.search(r"\((.*?)\)", str(current_val))
-    if match:
-        existing_date = match.group(1).strip()
-        return existing_date != str(new_date)
-    return True
 def process_po_background(order_id: str, sheet_name: str) -> None:
     try:
         # Step 1: Get the data (Slow)
@@ -615,16 +603,20 @@ def process_po_background(order_id: str, sheet_name: str) -> None:
         print(f"✅ Background processing finished for PO {order_id}")
     except Exception as e:
         print(f"❌ Background processing failed for PO {order_id}: {e}")
+def should_update(current_val: str, new_date: str) -> bool:
+    if pd.isna(current_val) or current_val == "":
+        return True
+    match = re.search(r"\((.*?)\)", str(current_val))
+    if match:
+        existing_date = match.group(1).strip()
+        return existing_date != str(new_date)
+    return True
 # =========== MAIN LOGIC ==========
 def get_purchase_order_df(order_id: str) -> pd.DataFrame:
     # Get purchase order
     url = f"https://www.zohoapis.com/inventory/v1/purchaseorders/{order_id}"
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
-        "X-com-zoho-inventory-organizationid": ORG_ID
-    }
     
-    response = HTTP.get(url, headers=headers)
+    response = HTTP.get(url, headers=get_zoho_headers())
     response.raise_for_status()
     po = response.json().get("purchaseorder", {})
     
@@ -649,7 +641,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                 # First get the sales order to get its ID
                 search_response = HTTP.get(
                     "https://www.zohoapis.com/inventory/v1/salesorders",
-                    headers=headers,
+                    headers=get_zoho_headers(),
                     params={"salesorder_number": so_num}
                 )
                 search_data = search_response.json()
@@ -660,7 +652,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
                         salesorder_id = so.get("salesorder_id")
                         # Now get the full sales order with line items
                         so_detail_url = f"https://www.zohoapis.com/inventory/v1/salesorders/{salesorder_id}"
-                        so_response = HTTP.get(so_detail_url, headers=headers)
+                        so_response = HTTP.get(so_detail_url, headers=get_zoho_headers())
                         so_response.raise_for_status()
                         so_detail = so_response.json().get("salesorder", {})
                         delivery_condition = (so_detail.get("custom_field_hash", {}).get("cf_payment_conditions", ""))
@@ -836,14 +828,13 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
 def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
     df = df[df['Supplier Company'] != 'HACH']
     perms_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{PERMS_ID}/content"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
     max_attempts = 6
     for attempt in range(max_attempts):
         try:
             # --- Download permissions Excel file ---
             try:
-                resp_perms = HTTP.get(perms_download, headers=headers, timeout=60)
+                resp_perms = HTTP.get(perms_download, headers=get_headers(), timeout=60)
                 resp_perms.raise_for_status()
                 perms_stream = io.BytesIO(resp_perms.content)
                 perms_df = pd.read_excel(perms_stream, header=1)
@@ -870,7 +861,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
 
     items_df = pd.read_csv("zoho_items.csv")
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{TRANS_FILE}/content"
-    resp = HTTP.get(url, headers=headers, timeout=60)
+    resp = HTTP.get(url, headers=get_headers(), timeout=60)
     resp.raise_for_status()
     trans = pd.read_excel(io.BytesIO(resp.content))
     trans_lookup = {}
@@ -951,8 +942,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
     f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
     f"/items/{FILE_ID}/workbook/tables/{table_name}/range"
     )
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}", "Content-Type": "application/json"}
-    tbl_range = HTTP.get(tbl_range_url, headers=headers, timeout=30).json()["address"]
+    tbl_range = HTTP.get(tbl_range_url, headers=get_headers(), timeout=30).json()["address"]
 
     tbl_range = tbl_range.split("!")[-1]  # A1:X57
     (start, end) = tbl_range.split(":")
@@ -964,7 +954,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
     url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/{table_name}/rows/add"
     
     payload = {"values": rows}
-    resp = HTTP.post(url, headers=headers, json=payload)
+    resp = HTTP.post(url, headers=get_headers(), json=payload)
 
     if resp.status_code not in (200, 201):
         raise Exception(f"❌ Append failed: {resp.status_code} {resp.text[:200]}")
@@ -1024,7 +1014,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
             f"/items/{FILE_ID}/workbook/worksheets/{sheet_name}"
             f"/range(address='{rng}')/format/fill"
         )
-        graph_safe_request( "PATCH", fill_url, headers, json={"color": f"#{r:02X}{g:02X}{b:02X}"}).raise_for_status()
+        graph_safe_request( "PATCH", fill_url, get_headers(), json={"color": f"#{r:02X}{g:02X}{b:02X}"}).raise_for_status()
     # ------------------ Apply Borders to All Appended Cells ------------------
     end_row = start_row + len(rows) - 1
     full_range = f"{first_col}{start_row}:{last_col}{end_row}"
@@ -1041,7 +1031,7 @@ def append_dataframe_to_table(df: pd.DataFrame, sheet_name: str) -> None:
 
     # Apply border to all edge types
     for border_type in ["EdgeTop","EdgeBottom","EdgeLeft","EdgeRight","InsideHorizontal","InsideVertical"]:
-        graph_safe_request("PATCH", f"{borders_url}/{border_type}", headers, json=border_payload).raise_for_status()
+        graph_safe_request("PATCH", f"{borders_url}/{border_type}", get_headers(), json=border_payload).raise_for_status()
 
 def process_hach(df: pd.DataFrame) -> None:
     with EXCEL_LOCK:
@@ -1052,10 +1042,6 @@ def process_hach(df: pd.DataFrame) -> None:
             po_number = po_full.replace("PO-00", "")
             sheet_name = po_number
             print(f"\n📌 Creating HACH sheet '{sheet_name}'...")
-            base_headers = {
-                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
-                "Content-Type": "application/json"
-            }
 
             # ─────────────────────────────────────────────
             # 2️⃣ Create workbook session (IMPORTANT)
@@ -1063,12 +1049,12 @@ def process_hach(df: pd.DataFrame) -> None:
             session = graph_safe_request(
                 "POST",
                 f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/workbook/createSession",
-                base_headers,
+                get_headers(),
                 {"persistChanges": True}
             ).json()
 
             session_headers = {
-                **base_headers,
+                **get_headers(),
                 "workbook-session-id": session["id"]
             }
 
@@ -1227,9 +1213,8 @@ def recieved_hach(po_number: str,date:str, items: list[dict]) -> None:
     po_sheet = re.sub(r"\D", "", po_number).lstrip("00")
     print(f"📄 HACH sheet name: {po_sheet}")
     with EXCEL_LOCK:
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
-        resp = HTTP.get(url_download, headers=headers, timeout=60)
+        resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
         resp.raise_for_status()
         file_stream = io.BytesIO(resp.content)
         wb = load_workbook(file_stream)
@@ -1322,7 +1307,7 @@ def recieved_hach(po_number: str,date:str, items: list[dict]) -> None:
         upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
 
         for attempt in range(8):
-            resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
+            resp = HTTP.put(upload_url, headers=get_headers(), data=output.getvalue())
             if resp.status_code in (409, 423):
                 time.sleep(min(30, 2 ** attempt))
                 continue
@@ -1369,11 +1354,10 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
 
             # --- Step 1: Download Excel ---
             url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
             for attempt in range(6):
                 try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                     resp.raise_for_status()
                     file_stream = io.BytesIO(resp.content)
                     wb = load_workbook(file_stream)
@@ -1457,7 +1441,7 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
             url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
 
             for attempt in range(10):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
                 if resp.status_code in (423, 409):
                     wait = min(30, 2 ** attempt)
                     print(f"⚠️ File locked, retrying in {wait}s")
@@ -1549,13 +1533,12 @@ def process_message(mailbox: str, message_id: str, message_date: datetime | str,
 
         # --- Step 1: Download current orders Excel file ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
                 # --- Download orders file ---
-                resp = HTTP.get(url_download, headers=headers, timeout=60)
+                resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                 resp.raise_for_status()
                 file_stream = io.BytesIO(resp.content)
                 wb = load_workbook(file_stream)
@@ -1628,7 +1611,7 @@ def process_message(mailbox: str, message_id: str, message_date: datetime | str,
         url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
         max_attempts = 10
         for attempt in range(max_attempts):
-            resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+            resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
             if resp.status_code in (423, 409):  # Locked
                 wait_time = min(30, 2**attempt) + random.uniform(0, 2)
                 print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
@@ -1667,10 +1650,9 @@ def process_hach_message(mailbox: str, message_id: str, message_date: datetime |
     confirmation_date = dt.date()  # <-- DATE ONLY
 
     with EXCEL_LOCK:
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
         msg_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}"
-        msg_resp = HTTP.get(msg_url, headers=headers, timeout=20)
+        msg_resp = HTTP.get(msg_url, headers=get_headers(), timeout=20)
         msg_resp.raise_for_status()
         message = msg_resp.json()
         subject = message.get("subject", "").strip()
@@ -1683,7 +1665,7 @@ def process_hach_message(mailbox: str, message_id: str, message_date: datetime |
 
         def download_excel(file_id):
             url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{file_id}/content"
-            resp = HTTP.get(url, headers=headers, timeout=60)
+            resp = HTTP.get(url, headers=get_headers(), timeout=60)
             resp.raise_for_status()
             return io.BytesIO(resp.content)
         main_stream   = download_excel(HACH_FILE)
@@ -1713,7 +1695,7 @@ def process_hach_message(mailbox: str, message_id: str, message_date: datetime |
         df = pd.DataFrame(data[1:], columns=data[0])
         df["Code"] = df["Code"].astype(str).str.strip()
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
-        att_resp = HTTP.get(att_url, headers=headers, timeout=20)
+        att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
         att_resp.raise_for_status()
         pdfs = [
             a for a in att_resp.json().get("value", [])
@@ -1798,7 +1780,7 @@ def process_hach_message(mailbox: str, message_id: str, message_date: datetime |
         upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
 
         for attempt in range(8):
-            resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
+            resp = HTTP.put(upload_url, headers=get_headers(), data=output.getvalue())
             if resp.status_code in (409, 423):
                 time.sleep(min(30, 2 ** attempt))
                 continue
@@ -1900,12 +1882,11 @@ def process_khrone_message(mailbox: str, message_id: str, message_date: datetime
         file_stream = None
         wb = None
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
         
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
-                resp = HTTP.get(url_download, headers=headers, timeout=60)
+                resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                 resp.raise_for_status()
                 file_stream = io.BytesIO(resp.content)
                 wb = load_workbook(file_stream)
@@ -1965,7 +1946,7 @@ def process_khrone_message(mailbox: str, message_id: str, message_date: datetime
             # Upload
             url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
             for attempt in range(10):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
                 if resp.status_code in (423, 409):
                     time.sleep(min(30, 2**attempt))
                     continue
@@ -2051,13 +2032,12 @@ def process_pentair_message(mailbox: str, message_id: str, message_date: datetim
 
         # --- Step 1: Download current orders Excel file ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
                 # --- Download orders file ---
-                resp = HTTP.get(url_download, headers=headers, timeout=60)
+                resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                 resp.raise_for_status()
                 file_stream = io.BytesIO(resp.content)
                 wb = load_workbook(file_stream)
@@ -2142,7 +2122,7 @@ def process_pentair_message(mailbox: str, message_id: str, message_date: datetim
         url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
         max_attempts = 10
         for attempt in range(max_attempts):
-            resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+            resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
             if resp.status_code in (423, 409):  # Locked
                 wait_time = min(30, 2**attempt) + random.uniform(0, 2)
                 print(f"⚠️ File locked (attempt {attempt+1}/{max_attempts}), retrying in {wait_time:.1f}s...")
@@ -2294,12 +2274,11 @@ def process_atb_message(mailbox: str, message_id: str, message_date: datetime | 
             wb = None
             orders_df = pd.DataFrame()
             url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
             # --- Download Excel ---
             max_attempts = 6
             for attempt in range(max_attempts):
                 try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                     resp.raise_for_status()
                     file_stream = io.BytesIO(resp.content)
                     wb = load_workbook(file_stream)
@@ -2415,7 +2394,7 @@ def process_atb_message(mailbox: str, message_id: str, message_date: datetime | 
             url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
             max_attempts = 10
             for attempt in range(max_attempts):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
                 if resp.status_code in (423, 409):
                     wait_time = min(30, 2**attempt) + random.uniform(0, 2)
                     print(f"⚠️ File locked. Retry in {wait_time:.1f}s")
@@ -2448,10 +2427,9 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
     print(f"📦 Packing List processing | mailbox={mailbox}, message_id={message_id}")
 
     with EXCEL_LOCK:
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
         # --- Step 1: Fetch message metadata ---
         msg_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}"
-        msg_resp = HTTP.get(msg_url, headers=headers, timeout=20)
+        msg_resp = HTTP.get(msg_url, headers=get_headers(), timeout=20)
         msg_resp.raise_for_status()
         message = msg_resp.json()
 
@@ -2474,7 +2452,7 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
 
         # --- Step 2: Fetch attachments ---
         att_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
-        att_resp = HTTP.get(att_url, headers=headers, timeout=20)
+        att_resp = HTTP.get(att_url, headers=get_headers(), timeout=20)
         att_resp.raise_for_status()
         attachments = att_resp.json().get("value", [])
         file_pattern = re.compile(r"^GG\w+$", re.IGNORECASE)
@@ -2525,7 +2503,7 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
         po_text_map = split_pdf_by_po(pdf_text, list(po_k_map.keys()))
         # --- Step 5: Open Excel ONCE ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
-        resp = HTTP.get(url_download, headers=headers, timeout=60)
+        resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
         resp.raise_for_status()
         wb = load_workbook(io.BytesIO(resp.content))
         total_updated = 0
@@ -2644,7 +2622,7 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
         output.seek(0)
         upload_url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
         for attempt in range(8):
-            resp = HTTP.put(upload_url, headers=headers, data=output.getvalue())
+            resp = HTTP.put(upload_url, headers=get_headers(), data=output.getvalue())
             if resp.status_code in (409, 423):
                 time.sleep(min(30, 2 ** attempt))
                 continue
@@ -2682,12 +2660,11 @@ def process_khrone_packing_list(mailbox: str, message_id: str, message_date: dat
         orders_df = pd.DataFrame()
 
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
-                resp = HTTP.get(url_download, headers=headers, timeout=60)
+                resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                 resp.raise_for_status()
                 file_stream = io.BytesIO(resp.content)
                 wb = load_workbook(file_stream)
@@ -2791,7 +2768,7 @@ def process_khrone_packing_list(mailbox: str, message_id: str, message_date: dat
 
         url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
         for attempt in range(10):
-            resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+            resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
             if resp.status_code in (423, 409):
                 time.sleep(min(30, 2**attempt))
                 continue
@@ -2809,11 +2786,10 @@ def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_star
         try:
             # --- Step 1: Download Excel ---
             url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
-            headers = {"Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"}
 
             for attempt in range(6):
                 try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                     resp.raise_for_status()
                     file_stream = io.BytesIO(resp.content)
                     wb = load_workbook(file_stream)
@@ -2895,7 +2871,7 @@ def delivery_date_nonhach(salesorder_number: str, skus: list[str], delivery_star
             url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
 
             for attempt in range(10):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
                 if resp.status_code in (423, 409):
                     wait = min(30, 2 ** attempt)
                     print(f"⚠️ File locked, retrying in {wait}s")
@@ -2929,17 +2905,12 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
     with EXCEL_LOCK:
         file_stream = None
         wb = None
-
         try:
             # --- Step 1: Download HACH Excel ---
             url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
-            headers = {
-                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}"
-            }
-
             for attempt in range(6):
                 try:
-                    resp = HTTP.get(url_download, headers=headers, timeout=60)
+                    resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
                     resp.raise_for_status()
                     file_stream = io.BytesIO(resp.content)
                     wb = load_workbook(file_stream)
@@ -3002,7 +2973,7 @@ def delivery_date_hach(salesorder_number: str,delivery_start: str,delivery_end: 
             url_upload = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
 
             for attempt in range(10):
-                resp = HTTP.put(url_upload, headers=headers, data=output.getvalue())
+                resp = HTTP.put(url_upload, headers=get_headers(), data=output.getvalue())
 
                 if resp.status_code in (423, 409):
                     wait = min(30, 2 ** attempt)
@@ -3065,10 +3036,7 @@ def send_email(customer_name:str, customer_mail:str, attachments: List[Dict[str,
     for from_email in MAILBOXES_2:
         r = HTTP.post(
             f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail",
-            headers={
-                "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE or One_Drive_Auth()}",
-                "Content-Type": "application/json"
-            },
+            headers=get_headers(),
             json={
             "message": {
                 "subject": subject,
@@ -3135,10 +3103,7 @@ def receive_webhook():
         data = payload.get("data", {})
         receive_id = data.get("purchase_receive_id")
         url = f"https://www.zohoapis.com/inventory/v1/purchasereceives/{receive_id}"
-        headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
-        }
-        response = HTTP.get(url, headers=headers)
+        response = HTTP.get(url, headers=get_zoho_headers())
         response.raise_for_status()
 
         receive = response.json().get("purchasereceive", {})
@@ -3169,13 +3134,10 @@ def delivered_webhook():
     package_id = request.json.get("data", {}).get("package_id")
     customer_name = request.json.get("data", {}).get("customer_name")
     customer_mail = request.json.get("data", {}).get("customer_mail")
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}"
-    }
 
     r = HTTP.get(
         f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
-        headers=headers,
+        headers=get_zoho_headers(),
         params={
             "organization_id": ORG_ID,
             "accept": "pdf"
@@ -3197,7 +3159,7 @@ def delivered_webhook():
         })
     packages_resp = HTTP.get(
     "https://www.zohoapis.com/inventory/v1/packages",
-    headers=headers,
+    headers=get_zoho_headers(),
     params={
         "organization_id": ORG_ID,
         "salesorder_number_contains": order_num,  # filter by SO number
@@ -3219,7 +3181,7 @@ def delivered_webhook():
 
         pkg_resp = HTTP.get(
             f"https://www.zohoapis.com/inventory/v1/packages/{pkg_id}",
-            headers=headers,
+            headers=get_zoho_headers(),
             params={"organization_id": ORG_ID}
         )
         pkg_resp.raise_for_status()
@@ -3262,25 +3224,12 @@ def invoice_webhook():
 
     base_datetime = datetime.now()
 
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {ACCESS_TOKEN or refresh_access_token()}",
-        "X-com-zoho-inventory-organizationid": ORG_ID
-    }
-
     # 1️⃣ Find Sales Order ID
     search_resp = HTTP.get(
         "https://www.zohoapis.com/inventory/v1/salesorders",
-        headers=headers,
+        headers=get_zoho_headers(),
         params={"salesorder_number": so_number}
     )
-    if search_resp.status_code == 401:
-        ACCESS_TOKEN = refresh_access_token()
-        headers["Authorization"] = f"Zoho-oauthtoken {ACCESS_TOKEN}"
-        search_resp = HTTP.get(
-            "https://www.zohoapis.com/inventory/v1/salesorders",
-            headers=headers,
-            params={"salesorder_number": so_number}
-        )
     search_resp.raise_for_status()
 
     salesorders = search_resp.json().get("salesorders", [])
@@ -3296,15 +3245,8 @@ def invoice_webhook():
     # 2️⃣ Fetch full Sales Order
     so_resp = HTTP.get(
         f"https://www.zohoapis.com/inventory/v1/salesorders/{so_id}",
-        headers=headers
+        headers=get_zoho_headers()
     )
-    if so_resp.status_code == 401:
-        ACCESS_TOKEN = refresh_access_token()
-        headers["Authorization"] = f"Zoho-oauthtoken {ACCESS_TOKEN}"
-        so_resp = HTTP.get(
-            f"https://www.zohoapis.com/inventory/v1/salesorders/{so_id}",
-            headers=headers
-        )
     so_resp.raise_for_status()
     so_detail = so_resp.json().get("salesorder", {})
 
@@ -3380,9 +3322,8 @@ def safe_request(method: str, url: str, **kwargs: Any) -> requests.Response:
     func = getattr(HTTP, method.lower())
     return func(url, timeout=timeout, **kwargs)
 def clear_all_subscriptions() -> None:
-    headers = get_headers()
     subs_url = f"{GRAPH_URL}/subscriptions"
-    resp = safe_request("get", subs_url, headers=headers)
+    resp = safe_request("get", subs_url, headers=get_headers())
     if resp.status_code != 200:
         raise RuntimeError(f"Failed to list subscriptions: {resp.text}")
 
@@ -3391,7 +3332,7 @@ def clear_all_subscriptions() -> None:
     for sub in subs:
         sub_id = sub["id"]
         del_url = f"{GRAPH_URL}/subscriptions/{sub_id}"
-        dresp = safe_request("delete", del_url, headers=headers)
+        dresp = safe_request("delete", del_url, headers=get_headers())
         if dresp.status_code not in (202, 204):
             print(f"Could not delete {sub_id}: {dresp.text}")
         else:
