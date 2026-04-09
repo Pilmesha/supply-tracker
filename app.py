@@ -165,7 +165,7 @@ def get_zoho_headers():
     global ACCESS_TOKEN, ZOHO_EXPIRY
     with TOKEN_LOCK:
         # Check if token is missing OR expired
-        if ACCESS_TOKEN is None or datetime.utcnow() >= ACCESS_TOKEN_EXPIRY:
+        if ACCESS_TOKEN is None or datetime.utcnow() >= ZOHO_EXPIRY:
             refresh_access_token()
             
     return {
@@ -198,11 +198,10 @@ def create_table_if_not_exists(range_address: str, sheet_name: str, has_headers:
     url_add = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/workbook/tables/add"
     )
-    headers["Content-Type"] = "application/json"
     payload = {"address": range_address, "hasHeaders": has_headers}
 
     for _ in range(retries):
-        resp = HTTP.post(url_add, headers=headers, json=payload)
+        resp = HTTP.post(url_add, headers=get_headers(), json=payload)
         if resp.status_code in [200, 201]:
             table = resp.json()
             print(f"✅ Created table '{table['name']}' at {range_address}")
