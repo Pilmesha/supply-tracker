@@ -1148,8 +1148,11 @@ def process_shipment(order_number: str, items: list) -> None:
 
             # Build DataFrame safely
             df_source = pd.DataFrame(data[1:], columns=data[0])
-            df_source["Code"] = df_source["Code"].astype(str).str.strip()
-            df_source["შეკვეთილი რაოდენობა"] = df_source["შეკვეთილი რაოდენობა"]
+            df_source["Code"] = df_source["Code"].astype(str).str.strip().str.lstrip('0')
+            def clean_qty(val):
+                match = re.search(r"[-+]?\d*\.\d+|\d+", str(val))
+                return float(match.group()) if match else 0.0
+            df_source["შეკვეთილი რაოდენობა"] = df_source["შეკვეთილი რაოდენობა"].apply(clean_qty)
 
             # --- Filter matching rows ---
             order_number = str(order_number).strip()
@@ -1163,19 +1166,15 @@ def process_shipment(order_number: str, items: list) -> None:
             delivered_by_sku = defaultdict(float)
 
             for item in items:
-                sku = item["sku"].strip().upper()
-                delivered_by_sku[sku] += float(item.get("quantity", 0))
+                incoming_sku = str(item["sku"]).strip().upper().lstrip('0')
+                delivered_by_sku[incoming_sku] += float(item.get("quantity", 0))
 
             for idx, row in matching.iterrows():
-                sku = row["Code"].strip().upper()
-                raw_qty = str(row["შეკვეთილი რაოდენობა"]).strip()
-                match = re.search(r"[-+]?\d*\.\d+|\d+", raw_qty)
-                if match:
-                    qty_ordered = float(match.group())
-                else:
-                    qty_ordered = 0.0
-                    print(f"⚠️ Warning: Could not find a number in '{raw_qty}'. Defaulting to 0.")
-                qty_delivered_so_far = float(row.get("მიწოდებული რაოდენობა", 0))
+                sku = str(row["Code"]).strip().upper().lstrip('0')
+                qty_ordered = row["შეკვეთილი რაოდენობა"] # Already a float now
+            
+                # Clean the "Delivered so far" column same as ordered qty
+                qty_delivered_so_far = clean_qty(row.get("მიწოდებული რაოდენობა", 0))
 
                 newly_delivered = delivered_by_sku.get(sku, 0)
 
