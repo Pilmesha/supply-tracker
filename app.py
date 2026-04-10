@@ -1168,8 +1168,13 @@ def process_shipment(order_number: str, items: list) -> None:
 
             for idx, row in matching.iterrows():
                 sku = row["Code"].strip().upper()
-
-                qty_ordered = float(row["შეკვეთილი რაოდენობა"])
+                raw_qty = str(row["შეკვეთილი რაოდენობა"]).strip()
+                match = re.search(r"[-+]?\d*\.\d+|\d+", raw_qty)
+                if match:
+                    qty_ordered = float(match.group())
+                else:
+                    qty_ordered = 0.0
+                    print(f"⚠️ Warning: Could not find a number in '{raw_qty}'. Defaulting to 0.")
                 qty_delivered_so_far = float(row.get("მიწოდებული რაოდენობა", 0))
 
                 newly_delivered = delivered_by_sku.get(sku, 0)
