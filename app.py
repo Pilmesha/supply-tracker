@@ -1394,10 +1394,10 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
                 ws = wb[sheet_name]
                 df = pd.DataFrame(ws.values)
                 df.columns = df.iloc[0]
-                df = df[1:].copy() # Use .copy() to avoid SettingWithCopyWarning
+                df = df[1:].copy()
 
-                # Safely convert to string: handles NaNs and floats better
-                df["PO"] = df["PO"].fillna("").astype(str).str.strip()
+                # Robust string conversion: convert to str, then strip
+                df["PO"] = df["PO"].fillna("").map(str).str.strip()
 
                 if (df["PO"] == po_str).any():
                     target_sheet = sheet_name
@@ -1416,7 +1416,8 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
             if not required_cols.issubset(target_df.columns):
                 raise ValueError(f"Missing required columns in '{target_sheet}'")
 
-            target_df["Item"] = (target_df["Item"].fillna("").astype(str).str.strip().str.lower())
+            # CRITICAL FIX: Use map(str) to prevent the "got float instead" error
+            target_df["Item"] = (target_df["Item"].fillna("").map(str).str.strip().str.lower())
             po_mask = target_df["PO"] == po_str
             date_value = (pd.to_datetime(date) - pd.Timedelta(days=2)).strftime("%d-%m-%Y")
             target_df.loc[po_mask, "ჩამოსვლის თარიღი"] = date_value
