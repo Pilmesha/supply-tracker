@@ -1364,9 +1364,7 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
                 print("⚠️ No valid PR items to process")
                 return
 
-            print("📦 Incoming Purchase Receive items:")
-            for p in pr_items:
-                print(f"   {p['po']} | {p['name']} → {p['quantity']}")
+            print("📦 Incoming Purchase Receive")
 
             # --- Step 1: Download Excel ---
             url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{FILE_ID}/content"
