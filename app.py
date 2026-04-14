@@ -1421,6 +1421,8 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
             po_mask = target_df["PO"] == po_str
             date_value = (pd.to_datetime(date) - pd.Timedelta(days=2)).strftime("%d-%m-%Y")
             target_df.loc[po_mask, "ჩამოსვლის თარიღი"] = date_value
+
+            target_df["რეალურად გამოგზავნილი რაოდენობა"] = pd.to_numeric(target_df["რეალურად გამოგზავნილი რაოდენობა"],errors="coerce")
             # --- Step 4: Order-preserving fill ---
             updated = 0
             for idx, row in target_df.iterrows():
