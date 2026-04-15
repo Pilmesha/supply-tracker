@@ -803,6 +803,7 @@ def get_purchase_order_df(order_id: str) -> pd.DataFrame:
         export_value = ""
         if supplier == "HACH":
             country_lc = so_info_by_sku.get(sku, {}).get("SO_Country", "").lower()
+            print(country_lc)
             if "azerbaijan" in country_lc or "armenia" in country_lc:
                 export_value = "კი"
             else:
