@@ -1265,11 +1265,10 @@ def recieved_hach(po_number: str,date:str, items: list[dict]) -> None:
         ]
 
         df = pd.DataFrame(data[1:], columns=data[0])
-        df["რეალური ჩამოსვლის თარიღი"] = (pd.to_datetime(date) - pd.Timedelta(days=2)).date()
         df['მდებარეობა'] = "ოფისი"
-
         df["Details"] = df["Details"].astype(str).str.strip()
-
+        target_date = (pd.to_datetime(date) - pd.Timedelta(days=2)).date()
+        df["Qty Delivered"] = pd.to_numeric(df["Qty Delivered"], errors="coerce").fillna(0)
         pr_items = []
 
         for item in items:
@@ -1298,21 +1297,29 @@ def recieved_hach(po_number: str,date:str, items: list[dict]) -> None:
         for idx, row in df.iterrows():
             details_norm = str(row["Details"]).strip()
 
-            # find first unused PR item with same name
             for pr in pr_items:
                 if not pr["used"] and pr["name"] == details_norm:
-                    df.at[idx, "Qty Delivered"] = pr["quantity"]
+                    # 1. ADD new quantity to existing quantity
+                    current_qty = df.at[idx, "Qty Delivered"]
+                    df.at[idx, "Qty Delivered"] = current_qty + pr["quantity"]
+                    
+                    # 2. SET date only for this matched row
+                    df.at[idx, "რეალური ჩამოსვლის თარიღი"] = target_date
+                    
                     pr["used"] = True
                     updated += 1
-                    print(f"   ✔ {row['Details']} → {pr['quantity']}")
+                    print(f"   ✔ {row['Details']} -> Added {pr['quantity']} (Total: {current_qty + pr['quantity']})")
                     break
 
         if updated == 0:
             print("⚠️ No items matched Excel Details column")
             return
+
+        # Handle your CoO backfill logic if needed
         mask_coo = df["Code"] == "CoO"
-        df.loc[mask_coo, "მდებარეობა"] = df.loc[mask_coo, "მდებარეობა"].bfill()
-        df.loc[mask_coo, "რეალური ჩამოსვლის თარიღი"] = df.loc[mask_coo, "რეალური ჩამოსვლის თარიღი"].bfill()
+        # Only backfill if there are values to fill from
+        if not df["რეალური ჩამოსვლის თარიღი"].isna().all():
+            df.loc[mask_coo, "რეალური ჩამოსვლის თარიღი"] = df.loc[mask_coo, "რეალური ჩამოსვლის თარიღი"].bfill()
         # --- Write back to Excel ---
         for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
             for c_idx, value in enumerate(row, start=start_col):
@@ -1424,15 +1431,14 @@ def recieved_nonhach(po_number: str, date:str, line_items: list[dict]) -> None:
                     # Match only if this PR item hasn't been applied yet
                     if not pr["used"] and row["PO"] == pr["po"] and row["Item"] == pr["name"]:
                         new_qty = pr["quantity"]
-                        
+                        current_qty = target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"]
+                        if pd.isna(current_qty):
+                            current_qty = 0
                         # UPDATE QUANTITY
-                        target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = new_qty
-                        
+                        target_df.at[idx, "რეალურად გამოგზავნილი რაოდენობა"] = current_qty + new_qty
                         # UPDATE DATE (Only for this specific matched row)
                         target_df.at[idx, "ჩამოსვლის თარიღი"] = date_value
-                        
                         print(f"   ✔ {row['Item']} → Qty: {new_qty}, Date: {date_value}")
-                        
                         pr["used"] = True
                         updated += 1
                         break  # Move to the next Excel row
