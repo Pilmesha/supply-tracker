@@ -152,7 +152,7 @@ def One_Drive_Auth() -> str:
     except Exception as e:
         print(f"Error getting access token: {e}")
         return None
-def get_headers()-> Mapping[str, str]:
+def get_headers() -> Mapping[str, str]:
     global ACCESS_TOKEN_DRIVE, DRIVE_EXPIRY
     with TOKEN_LOCK: # Keep this thread-safe too!
         if ACCESS_TOKEN_DRIVE is None or datetime.utcnow() >= DRIVE_EXPIRY:
@@ -161,7 +161,7 @@ def get_headers()-> Mapping[str, str]:
         "Authorization": f"Bearer {ACCESS_TOKEN_DRIVE}",
         "Content-Type": "application/json"
     }
-def get_zoho_headers():
+def get_zoho_headers() -> Mapping[str, str]:
     global ACCESS_TOKEN, ZOHO_EXPIRY
     with TOKEN_LOCK:
         # Check if token is missing OR expired
