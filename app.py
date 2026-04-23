@@ -3148,17 +3148,24 @@ def receive_webhook():
 @app.route('/delivered', methods=['POST'])
 def delivered_webhook():
     One_Drive_Auth()
+    # Use as_text=True to get the decoded string
     raw_data = request.get_data(as_text=True)
     try:
         data_dict = json.loads(raw_data)
     except json.JSONDecodeError:
-        fixed_data = re.sub(r'(?<=: )"(.*?)"(?=,|} )', 
-                            lambda m: '"' + m.group(1).replace('"', '\\"') + '"', 
-                            raw_data)
         try:
+            def fix_quotes(match):
+                key = match.group(1)
+                value = match.group(2).replace('"', '\\"')
+                return f'"{key}":"{value}"'
+
+            # Regex: finds "key":"value" even if value has internal quotes
+            fixed_data = re.sub(r'"(\w+)":"(.*?)"(?=[,}])', fix_quotes, raw_data)
             data_dict = json.loads(fixed_data)
-        except:
-            return "Malformed JSON payload even after fix attempt", 400
+        except Exception as e:
+            print(f"Failed to fix JSON: {e}")
+            return "Malformed JSON payload", 400
+    # IMPORTANT: signature check must use ORIGINAL raw_data
     if not verify_zoho_signature(request, "shipmentorders"):
         return "Invalid signature", 403
     inner_data = data_dict.get("data", {})
