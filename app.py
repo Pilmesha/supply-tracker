@@ -3148,7 +3148,7 @@ def receive_webhook():
 @app.route('/delivered', methods=['POST'])
 def delivered_webhook():
     One_Drive_Auth()
-    print("RAW BODY:", request.data)
+    raw_data = request.get_data(as_text=True)
     try:
         data_dict = json.loads(raw_data)
     except json.JSONDecodeError:
