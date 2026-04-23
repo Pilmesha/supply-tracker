@@ -3148,8 +3148,22 @@ def receive_webhook():
 @app.route('/delivered', methods=['POST'])
 def delivered_webhook():
     One_Drive_Auth()
+    print("RAW BODY:", request.data)
+
+    data = request.get_json(silent=True) or {}
+    payload = data.get("data", {})
+
+    if not payload:
+        return "Invalid payload", 400
+
+    order_num = payload.get("sales_order_number")
+    package_id = payload.get("package_id")
+
+    if not package_id:
+        return "Missing package_id", 400
+
     if not verify_zoho_signature(request, "shipmentorders"):
-            return "Invalid signature", 403
+        return "Invalid signature", 403
     order_num = request.json.get("data", {}).get("sales_order_number")
     package_num = request.json.get("data", {}).get("package_number")
     package_id = request.json.get("data", {}).get("package_id")
