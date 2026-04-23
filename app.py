@@ -3149,26 +3149,24 @@ def receive_webhook():
 def delivered_webhook():
     One_Drive_Auth()
     print("RAW BODY:", request.data)
-
-    data = request.get_json(silent=True) or {}
-    payload = data.get("data", {})
-
-    if not payload:
-        return "Invalid payload", 400
-
-    order_num = payload.get("sales_order_number")
-    package_id = payload.get("package_id")
-
-    if not package_id:
-        return "Missing package_id", 400
-
+    try:
+        data_dict = json.loads(raw_data)
+    except json.JSONDecodeError:
+        fixed_data = re.sub(r'(?<=: )"(.*?)"(?=,|} )', 
+                            lambda m: '"' + m.group(1).replace('"', '\\"') + '"', 
+                            raw_data)
+        try:
+            data_dict = json.loads(fixed_data)
+        except:
+            return "Malformed JSON payload even after fix attempt", 400
     if not verify_zoho_signature(request, "shipmentorders"):
         return "Invalid signature", 403
-    order_num = request.json.get("data", {}).get("sales_order_number")
-    package_num = request.json.get("data", {}).get("package_number")
-    package_id = request.json.get("data", {}).get("package_id")
-    customer_name = request.json.get("data", {}).get("customer_name")
-    customer_mail = request.json.get("data", {}).get("customer_mail")
+    inner_data = data_dict.get("data", {})
+    order_num = inner_data.get("sales_order_number")
+    package_num = inner_data.get("package_number")
+    package_id = inner_data.get("package_id")
+    customer_name = inner_data.get("customer_name")
+    customer_mail = inner_data.get("customer_mail")
 
     r = HTTP.get(
         f"https://www.zohoapis.com/inventory/v1/packages/{package_id}",
