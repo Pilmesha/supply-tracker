@@ -339,31 +339,7 @@ def normalize_hach(df: pd.DataFrame) -> pd.DataFrame:
     df['მდებარეობა'] = "გერმანია"
     df = df[table_cols]
     return df.fillna("").astype(str)
-def split_pdf_by_po(pdf_text: str, po_numbers: list[str]) -> dict[str, str]:
-    blocks = {}
-    # sort by PO occurrence in PDF
-    po_positions = []
 
-    # Find start position of each PO in PDF
-    for po in po_numbers:
-        # regex to find PO with optional leading zeros
-        match = re.search(rf"PO\s*[-:#–]?\s*0*{po}\b", pdf_text)
-        if match:
-            po_positions.append((po, match.start()))
-        else:
-            print(f"⚠️ PO-{po} not found in PDF text")
-    
-    # sort by start index
-    po_positions.sort(key=lambda x: x[1])
-
-    for i, (po, start) in enumerate(po_positions):
-        if i + 1 < len(po_positions):
-            end = po_positions[i + 1][1]
-        else:
-            end = len(pdf_text)
-        blocks[po] = pdf_text[start:end]
-
-    return blocks
 def graph_safe_request(method: Literal["GET", "POST", "PATCH", "DELETE", "PUT"], url: str, headers: Mapping[str, str], json: Optional[dict[str, Any]] = None, max_retries: int = 5) -> requests.Response:
     last_resp = None
 
@@ -404,41 +380,34 @@ def graph_safe_request(method: Literal["GET", "POST", "PATCH", "DELETE", "PUT"],
         raise RuntimeError("Graph request failed with no response returned.")
 def is_empty(val: str) -> bool:
     return val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == ""
-def extract_po_k_mapping(pdf_text: str) -> dict:
-    po_pattern = re.compile(r"\bPO[-:#]?\s*(\d+)\b")
-    k_pattern = re.compile(r"\bK\d{9}\b", re.IGNORECASE)
-
-    po_matches = list(po_pattern.finditer(pdf_text))
-    mapping = {}
-
-    if not po_matches:
-        print("❌ No PO numbers found in text")
-        return mapping
-
-    # Find all Ks in the document
-    all_k = k_pattern.findall(pdf_text)
-    first_k = all_k[0].upper() if all_k else None
-
-    for idx, po in enumerate(po_matches):
-        po_digits = str(int(po.group(1)))
-        block_start = po.end()
-
-        # block ends at next PO or end of document
-        block_end = po_matches[idx + 1].start() if idx + 1 < len(po_matches) else len(pdf_text)
-        po_block = pdf_text[block_start:block_end]
-
-        # Try to find K inside the PO block
-        k_match = k_pattern.search(po_block)
-        if k_match:
-            mapping[po_digits] = k_match.group(0).upper()
-        elif first_k:
-            # fallback to first K in the document
-            mapping[po_digits] = first_k
-            print(f"⚠️ No K found inside PO-{po_digits} block, using first K in document")
-        else:
-            print(f"⚠️ No K found for PO-{po_digits} anywhere")
-
-    return mapping
+def extract_po_k_sections(pdf_text: str) -> list[dict]:
+    sections = []
+    
+    # This pattern identifies the start of a new internal block
+    # It looks for the K-number (internal number) which is the unique identifier
+    k_pattern = re.compile(r"(K\d{7,10})", re.IGNORECASE)
+    matches = list(k_pattern.finditer(pdf_text))
+    
+    for i, match in enumerate(matches):
+        k_num = match.group(1)
+        start = match.start()
+        # The section ends where the next K-number starts
+        end = matches[i+1].start() if i + 1 < len(matches) else len(pdf_text)
+        
+        section_text = pdf_text[start:end]
+        
+        lookback_window = pdf_text[max(0, start-500):start]
+        po_match = re.search(r"PO-0*(\d+)", lookback_window + section_text, re.IGNORECASE)
+        
+        if po_match:
+            po_num = str(int(po_match.group(1)))
+            sections.append({
+                "po": po_num,
+                "k_number": k_num,
+                "text": section_text
+            })
+            
+    return sections
 def get_sheet_values(sheet_name: str) -> list[list[Any]]:
     url = (
         f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/"
@@ -2452,16 +2421,6 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
         msg_url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}"
         msg_resp = HTTP.get(msg_url, headers=get_headers(), timeout=20)
         msg_resp.raise_for_status()
-        message = msg_resp.json()
-
-        subject = message.get("subject", "").strip()
-        k_numbers = re.findall(r"K\d+", subject, re.IGNORECASE)
-        if not k_numbers:
-            print(f"❌ No K numbers found in subject: {subject!r}")
-            return
-
-        k_numbers = [k.upper() for k in k_numbers]
-        print(f"📦 Found Packing Lists in subject: {k_numbers}")
 
         if isinstance(message_date, str):
             dt = datetime.fromisoformat(message_date.replace("Z", "+00:00"))
@@ -2483,7 +2442,13 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
             if file_pattern.match(a['name'].split(".")[0])
             and a['name'].lower().endswith((".pdf", ".rtf"))
         ]
+        
+        if not pdf_attachments:
+            print("❌ No matching PDF/RTF attachments found")
+            return
+
         file_bytes = base64.b64decode(pdf_attachments[0]['contentBytes'])
+        
         # --- Step 3: Extract text ---
         pdf_text = ""
         if pdf_attachments[0]['name'].lower().endswith(".pdf"):
@@ -2491,7 +2456,6 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
                 for page in pdf.pages:
                     chars = sorted(page.chars, key=lambda c: (c['top'], c['x0']))
                     current_line, last_top, last_x = [], None, None
-
                     for c in chars:
                         if last_top is None or abs(c['top'] - last_top) > 3:
                             if current_line:
@@ -2503,141 +2467,104 @@ def packing_list(mailbox: str, message_id: str, message_date: datetime | str, in
                                 current_line.append(" ")
                             current_line.append(c['text'])
                             last_x = c['x1']
-
                     if current_line:
                         pdf_text += "".join(current_line) + "\n"
         else:
             pdf_text = file_bytes.decode(errors="ignore")
-        # --- Step 4: Extract ALL PO numbers ---
-        po_numbers = [
-            str(int(m)) for m in re.findall(r"\bPO[-:#]?\s*(\d+)\b", pdf_text)
-        ]
-        if not po_numbers:
-            print("❌ No PO numbers found in file")
+
+        # --- Step 4: Extract Sections ---
+        sections = extract_po_k_sections(pdf_text)
+        if not sections:
+            print("❌ No valid PO/K-Number sections found")
             return
-        print(f"📄 Found POs: {po_numbers}")
-        po_k_map = extract_po_k_mapping(pdf_text)
-        if not po_k_map:
-            print("❌ Could not map Packing Lists to POs")
-            return
-        print(f"🔗 PO → Packing List mapping: {po_k_map}")
-        po_text_map = split_pdf_by_po(pdf_text, list(po_k_map.keys()))
-        # --- Step 5: Open Excel ONCE ---
+
+        # --- Step 5: Open Excel ---
         url_download = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/items/{HACH_FILE}/content"
         resp = HTTP.get(url_download, headers=get_headers(), timeout=60)
         resp.raise_for_status()
         wb = load_workbook(io.BytesIO(resp.content))
         total_updated = 0
         # --- Step 6: Process each PO ---
-        for po_number_digits, po_text in po_text_map.items():
-            print(f"➡️ Processing PO {po_number_digits}")
-            po_k_number = po_k_map.get(po_number_digits)
+        from collections import defaultdict
+        po_groups = defaultdict(list)
+        for sec in sections:
+            po_groups[sec['po']].append(sec)
 
-            if not po_k_number:
-                print(f"⚠️ No Packing List mapped for PO {po_number_digits}")
+        for po_number_digits, list_of_sections in po_groups.items():
+            print(f"➡️ Processing PO {po_number_digits}")
+            
+            try:
+                ws = wb[po_number_digits]
+            except KeyError:
+                print(f"⚠️ Sheet {po_number_digits} not found in Excel")
                 continue
-            print(f"🔗 PO {po_number_digits} → Packing List {po_k_number}")
-            ws = wb[po_number_digits]
+
+            # --- Load Excel Table Data ---
             tables = list(ws.tables.values())
+            if not tables: continue
             table = tables[0]
             start_cell, end_cell = table.ref.split(":")
-            start_row = ws[start_cell].row
-            start_col = ws[start_cell].column
-            end_row = ws[end_cell].row
-            end_col = ws[end_cell].column
-            data = [
-                list(r) for r in ws.iter_rows(
-                    min_row=start_row,
-                    max_row=end_row,
-                    min_col=start_col,
-                    max_col=end_col,
-                    values_only=True
-                )
-            ]
+            start_row, start_col = ws[start_cell].row, ws[start_cell].column
+            end_row, end_col = ws[end_cell].row, ws[end_cell].column
+            
+            data = [list(r) for r in ws.iter_rows(min_row=start_row, max_row=end_row, 
+                                                min_col=start_col, max_col=end_col, values_only=True)]
             df = pd.DataFrame(data[1:], columns=data[0])
             df["Code"] = df["Code"].astype(str).str.strip()
-            code_quantity_map = {}
-            for idx, row in df.iterrows():
-                base_code = str(row["Code"]).strip()
-                code_pattern_str = re.escape(base_code) + r"(?:-EU)?"
-                ordered_qty = row.get("QTY")
-                
-                # Use finditer to find ALL occurrences of the code in the PDF text for this PO
-                pattern = re.compile(rf"{code_pattern_str}\s+([\d.,\s]+)", re.IGNORECASE)
-                all_matches = pattern.finditer(po_text)
-                
-                total_extracted_qty = 0.0
-                found_at_least_one = False
 
-                for match_obj in all_matches:
-                    potential_string = match_obj.group(1)
-                    # Find all number candidates in the string following the code
-                    candidates = re.findall(r"\d+(?:[.,]\d+)?", potential_string)
-                    
-                    for cand_str in candidates:
-                        try:
-                            clean_cand = cand_str.replace(",", ".")
-                            potential_qty = float(clean_cand)
-                            
-                            # Validation Logic: 
-                            # If we have an ordered_qty, only sum it if it's realistic
-                            if ordered_qty and isinstance(ordered_qty, (int, float)):
-                                if potential_qty <= ordered_qty:
-                                    total_extracted_qty += potential_qty
-                                    found_at_least_one = True
-                                    break # Move to the next match_obj for this code
-                            else:
-                                # No reference QTY, just accumulate the first number found for this occurrence
-                                total_extracted_qty += potential_qty
-                                found_at_least_one = True
-                                break 
-                        except ValueError:
-                            continue
-                
-                # Only add to map if we actually found the code in the text
-                if found_at_least_one:
-                    code_quantity_map[base_code] = total_extracted_qty
-                else:
-                    code_quantity_map[base_code] = None
             updated = 0
             for idx, row in df.iterrows():
                 base_code = str(row["Code"]).strip()
-                code_in_pdf_pattern = re.compile(re.escape(base_code) + r"(?:-EU)?", re.IGNORECASE)
-                if not code_in_pdf_pattern.search(po_text):
+                if base_code == "CoO" or is_empty(base_code):
                     continue
 
-                if is_empty(row.get("Packing List")):
-                    df.at[idx, "Packing List"] = po_k_number
+                code_pattern = re.compile(re.escape(base_code) + r"(?:-EU)?", re.IGNORECASE)
+                ordered_qty = row.get("QTY")
 
-                if is_empty(row.get("რა რიცხვში გამოგზავნეს Packing List-ი")):
-                    df.at[idx, "რა რიცხვში გამოგზავნეს Packing List-ი"] = confirmation_date_str
+                for section in list_of_sections:
+                    sec_text = section['text']
+                    k_num = section['k_number']
 
-                if is_empty(row.get("ჩამოსვლის სავარაუდო თარიღი")):
-                    df.at[idx, "ჩამოსვლის სავარაუდო თარიღი"] = arrival_date_str
+                    if code_pattern.search(sec_text):
+                        pattern_qty = re.compile(rf"{re.escape(base_code)}(?:-EU)?\s+([\d.,\s]+)", re.IGNORECASE)
+                        qty_match = pattern_qty.search(sec_text)
+                        
+                        extracted_qty = None
+                        if qty_match:
+                            candidates = re.findall(r"\d+(?:[.,]\d+)?", qty_match.group(1))
+                            for cand in candidates:
+                                val = float(cand.replace(",", "."))
+                                if ordered_qty and isinstance(ordered_qty, (int, float)):
+                                    if val <= ordered_qty:
+                                        extracted_qty = val
+                                        break
+                                else:
+                                    extracted_qty = val
+                                    break
+                        df.at[idx, "Packing List"] = k_num
+                        df.at[idx, "რა რიცხვში გამოგზავნეს Packing List-ი"] = confirmation_date_str
+                        df.at[idx, "ჩამოსვლის სავარაუდო თარიღი"] = arrival_date_str
+                        df.at[idx, "რამდენი გამოიგზავნა"] = extracted_qty
+                        updated += 1
+                        break 
+            
+            if updated > 0:
+                total_updated += updated
+                mask_coo = df["Code"] == "CoO"
+                for col in ["Packing List", "რა რიცხვში გამოგზავნეს Packing List-ი", "ჩამოსვლის სავარაუდო თარიღი", "რამდენი გამოიგზავნა"]:
+                    df.loc[mask_coo, col] = df.loc[mask_coo, col].bfill()
 
-                if is_empty(row.get("რამდენი გამოიგზავნა")):
-                    df.at[idx, "რამდენი გამოიგზავნა"] = code_quantity_map.get(base_code)
+                for r_idx, row_vals in enumerate(df.values.tolist(), start=start_row + 1):
+                    for c_idx, value in enumerate(row_vals, start=start_col):
+                        ws.cell(row=r_idx, column=c_idx).value = value
+                print(f"✅ PO {po_number_digits}: {updated} rows updated")
 
-                updated += 1
-            if updated == 0:
-                print(f"⚠️ No matching codes for PO {po_number_digits}")
-                conn.close()
-                continue
-            total_updated += updated
-            mask_coo = df["Code"] == "CoO"
-            df.loc[mask_coo, "Packing List"] = df.loc[mask_coo, "Packing List"].bfill()
-            df.loc[mask_coo, "რა რიცხვში გამოგზავნეს Packing List-ი"] = df.loc[mask_coo, "რა რიცხვში გამოგზავნეს Packing List-ი"].bfill()
-            df.loc[mask_coo, "ჩამოსვლის სავარაუდო თარიღი"] = df.loc[mask_coo, "ჩამოსვლის სავარაუდო თარიღი"].bfill()
-            df.loc[mask_coo, "რამდენი გამოიგზავნა"] = df.loc[mask_coo, "რამდენი გამოიგზავნა"].bfill()
-            for r_idx, row in enumerate(df.values.tolist(), start=start_row + 1):
-                for c_idx, value in enumerate(row, start=start_col):
-                    ws.cell(row=r_idx, column=c_idx).value = value
-            print(f"✅ PO {po_number_digits}: {updated} rows updated")
         if total_updated == 0:
             print("⚠️ No updates made to Excel")
             conn.close()
             return
-        # --- Step 7: Upload Excel ONCE ---
+
+        # --- Step 7: Upload Excel ---
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
@@ -3458,7 +3385,7 @@ def webhook():
         )
 
         greenlight_pattern = re.compile(
-            r'(Greenlight|Shipping)\s+request.*?/\s*K\d{6,}',
+            r'(Greenlight|Shipping)\s+request.*?(?:/\s*K\d{6,})?',
             re.IGNORECASE
         )
 
